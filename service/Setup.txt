@@ -1,0 +1,67 @@
+##########################################################
+#
+nano ~/.config/lxsession/LXDE-pi/autostart
+
+@/usr/bin/python /home/pi/AStepUp/AdProcess.py &
+
+##########################################################
+# needs to be executed once
+sudo loginctl enable-linger pi
+
+mkdir -p ~/.config/systemd/user
+cp adprocess.service /home/pi/.config/systemd/user/
+
+systemctl --user daemon-reload
+systemctl --user enable adprocess.service
+systemctl --user start  adprocess.service
+
+systemctl --user daemon-reload
+systemctl --user enable --now adprocess.service
+
+##########################################################
+# start a service
+sudo cp inhouse.service /etc/systemd/system/
+
+sudo systemctl daemon-reload
+sudo systemctl restart inhouse.service
+
+##########################################################
+# Stop the service
+sudo systemctl stop inhouse.service
+
+# (Optional) Check it really stopped
+sudo systemctl status inhouse.service
+
+# Restart it (stop + start in one go)
+sudo systemctl restart inhouse.service
+
+# Verify it’s back online
+sudo systemctl status inhouse.service
+systemctl --user status adprocess.service
+
+####################################################
+# to see service errors
+sudo journalctl -u inhouse -f
+journalctl -u inhouse
+
+###########################################
+# remove a service
+# 1. Stop it if it’s running
+sudo systemctl stop inhouse.service
+
+# 2. Disable it so it won’t restart on boot
+sudo systemctl disable inhouse.service
+
+# 3. (Optional) Mask it if you want to block any accidental starts
+sudo systemctl mask inhouse.service
+
+# 4. Remove the unit file
+sudo rm /etc/systemd/system/inhouse.service
+
+# 5. Tell systemd to reload its unit listings
+sudo systemctl daemon-reload
+
+# 6. Clean up any “failed” state
+sudo systemctl reset-failed
+
+

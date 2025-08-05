@@ -1,0 +1,4 @@
+{
+    "git.requireGitUserConfig": false,
+    "python.analysis.typeCheckingMode": "strict"
+}
