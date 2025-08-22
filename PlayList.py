@@ -8,6 +8,7 @@ import datetime
 import logging
 import os
 
+from AdLogging import *
 from AdConfig import PLAY_LIST, LOCAL_VIDEOS, LOCAL_PICTURES
 from Player import PlayVideo, GetCurrentlyPlaying
 
@@ -42,7 +43,7 @@ def NormalizeTime(strTime: str, adjust: bool = True) -> int:
 
 #/////////////////////////////////////////////////////////////////////////////
 def ProcessPlayList() -> None:
-    logger.debug("********** Processing PlayList starting **********")
+    logger.debug(f"{START} Processing PlayList starting **********")
 
     now = datetime.datetime.now()
     today = now.date()
@@ -51,37 +52,29 @@ def ProcessPlayList() -> None:
 
     useThis: str = ""
 
-    # Determine mode from first entry
     entries = list(PLAY_LIST.values())
-    first_video = str(entries[0].get("video", "")).strip() if entries else ""
-    is_directory_mode = first_video.endswith("/")
-
-    base_path = LOCAL_PICTURES if is_directory_mode else LOCAL_VIDEOS
-
-    if not os.path.isdir(base_path):
-        logger.error(f"Base media path does not exist: {base_path}")
-        return
 
     for entry in entries:
         video = str(entry.get("video", "")).strip()
         if not video:
             continue
 
-        # Enforce playlist consistency
-        if video.endswith("/") != is_directory_mode:
-            logger.error(f"Inconsistent playlist entry: {video} does not match expected {'directory' if is_directory_mode else 'file'} mode")
-            continue
+        # Per-entry type and base path
+        is_directory_entry = video.endswith("/")
+        base_path = LOCAL_PICTURES if is_directory_entry else LOCAL_VIDEOS
 
-        video_path = os.path.join(base_path, video)
+        # Normalize path (strip trailing slash for joins)
+        video_norm = video[:-1] if is_directory_entry and video.endswith("/") else video
+        video_path = os.path.join(base_path, video_norm)
 
         # Existence check
-        if is_directory_mode:
+        if is_directory_entry:
             if not os.path.isdir(video_path):
-                logger.warning(f"Skipping {video}: local directory missing ({video_path})")
+                logger.warning(f"{WARN} Skipping {video}: local directory missing ({video_path})")
                 continue
         else:
             if not os.path.isfile(video_path):
-                logger.warning(f"Skipping {video}: local file missing ({video_path})")
+                logger.warning(f"{WARN} Skipping {video}: local file missing ({video_path})")
                 continue
 
         # 1. Start/End Date filtering
@@ -92,28 +85,28 @@ def ProcessPlayList() -> None:
             if start_date_str:
                 start_date = datetime.datetime.strptime(start_date_str, "%Y-%m-%d").date()
                 if today < start_date:
-                    logger.debug(f"Skipping {video}: not yet in play window (starts {start_date_str})")
+                    logger.debug(f"{WARN} Skipping {video}: not yet in play window (starts {start_date_str})")
                     continue
 
             if end_date_str:
                 end_date = datetime.datetime.strptime(end_date_str, "%Y-%m-%d").date()
                 if today > end_date:
-                    logger.debug(f"Skipping {video}: expired play window (ended {end_date_str})")
+                    logger.debug(f"{WARN} Skipping {video}: expired play window (ended {end_date_str})")
                     continue
 
         except ValueError as ve:
-            logger.warning(f"{video}: invalid date format in start or end date: {ve}")
+            logger.warning(f"{FAIL} {video}: invalid date format in start or end date: {ve}")
             continue
 
         # 2. Day-of-week filtering
-        days = [d.strip() for d in entry.get("days", "").split(",") if d.strip()]
+        days = [d.strip() for d in (entry.get("days") or "").split(",") if d.strip()]
         if days and weekday not in days:
             logger.debug(f"Skipping {video}: not scheduled for {weekday}")
             continue
 
         # 3. Time-of-day filtering
-        start_time_str = entry.get("start", "").strip()
-        end_time_str = entry.get("end", "").strip()
+        start_time_str = (entry.get("start") or "").strip()
+        end_time_str = (entry.get("end") or "").strip()
 
         if start_time_str and end_time_str:
             try:
@@ -126,11 +119,11 @@ def ProcessPlayList() -> None:
                     continue
 
             except Exception as e:
-                logger.warning(f"{video}: invalid time range ({start_time_str} to {end_time_str}): {e}")
+                logger.warning(f"{FAIL} {video}: invalid time range ({start_time_str} to {end_time_str}): {e}")
                 continue
 
         # 4. ThisWeekOnly — skip if directory mode
-        if not is_directory_mode and entry.get("repeat", "").strip().lower() == "thisweekonly":
+        if not is_directory_entry and entry.get("repeat", "").strip().lower() == "thisweekonly":
             try:
                 mtime = datetime.datetime.fromtimestamp(os.path.getmtime(video_path)).date()
                 now_week = today.isocalendar()[1]
@@ -141,13 +134,10 @@ def ProcessPlayList() -> None:
                     continue
 
             except Exception as e:
-                logger.warning(f"{video}: error checking modification time: {e}")
+                logger.warning(f"{FAIL} {video}: error checking modification time: {e}")
                 continue
 
         # All filters passed — mark candidate
-        if not useThis and video != "Default.mp4":
-            logger.warning(f"Starting to play {GetCurrentlyPlaying()}, {useThis}")
-
         useThis = video_path
 
     currently_playing = GetCurrentlyPlaying()
@@ -156,7 +146,6 @@ def ProcessPlayList() -> None:
     # Do NOT check for file changes — sync_files() already ensures everything is up to date.
     # (Yes, past-me tried this. No, it wasn't necessary. You're welcome.)
     if useThis and currently_playing != useThis:
-        mode = "slideshow" if is_directory_mode else "video"
-        logger.info(f"Restarting {mode}: {useThis}")
+        mode = "slideshow" if os.path.isdir(useThis) else "video"
+        logger.info(f"{PLAY} Restarting {mode}: {useThis}")
         PlayVideo(useThis)
-        

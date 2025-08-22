@@ -30,9 +30,10 @@ class PlayerArgs(TypedDict):
     stdout: Any
     stderr: Any
 
-# Define a base with just the required 'default' selector
+# Define a base with just the required selector
 class PlayerConfigBase(TypedDict):
-    default: str
+    vid_player: str
+    dir_player: str
 
 # The full PlayerConfig is dynamically interpreted as a plain dict
 # that contains a 'default' key and any number of player configs.

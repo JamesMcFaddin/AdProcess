@@ -12,7 +12,7 @@ import logging
 from AdConfig import CONFIG, IsRaspberryPI
 from typing import Optional, Any
 from pathlib import Path
-
+from AdLogging import *
 
 logger = logging.getLogger(__name__)
 PlayerProcess: Optional[subprocess.Popen[Any]] = None
@@ -28,44 +28,56 @@ def StopPlayer():
     global PlayerProcess
 
     if not PlayerProcess:
-        logger.debug("No player, that I know of, is running.")
+        logger.debug(f"No player, that I know of, is running.")
         return
 
     # If already exited, just reap
     if PlayerProcess.poll() is not None:
-        logger.warning("Player already exited (code %s).", PlayerProcess.returncode)
+        logger.warning(f"{WARN} Player already exited (code: {PlayerProcess.returncode}")
         PlayerProcess = None
         return
 
     try:
         PlayerProcess.kill()  # harsh but fast
         PlayerProcess.wait(timeout=5) # Block until the OS reaps it
-        logger.info("Player stopped successfully.")
+        logger.info(f"{STOP} Player stopped successfully.")
         
     except subprocess.SubprocessError as e:
-        logger.error("Error stopping player: %s", e)
+        logger.error("{FAIL}{STOP} Error stopping player: %s", e)
         
     finally:
         PlayerProcess = None
 
 #/////////////////////////////////////////////////////////////////////////////
     
-def PlayVideo(video_file: str) -> bool:
+def PlayVideo(target: str) -> bool:
+    """
+    Decide handler by TARGET TYPE, then play:
+      - Directory  -> Players['dir_player']
+      - File/other -> Players['vid_player']
+    Expects handler functions named Play_<player_key.lower()> to exist, e.g., Play_vlc, Play_feh.
+    """
     global PlayerProcess, VideoBeingPlayed
 
-    player_key = CONFIG["Players"].get("default")
-    if not player_key:
-        logger.error("No default player specified in configuration.")
+    p = Path(target)
+    players = CONFIG.get("Players", {})
+    if not players:
+        logger.error(f"{FAIL} CONFIG.Players missing.")
         return False
 
-    player_cfg = CONFIG["Players"].get(player_key)
+    selector_key = "dir_player" if p.is_dir() else "vid_player"
+    player_key = players.get(selector_key)
+    if not player_key:
+        logger.error("CONFIG.Players['%s'] not set IN '%s'", selector_key, player_key)
+        return False
+
+    player_cfg = players.get(player_key)
     if not player_cfg:
-        logger.error("No configuration found for player '%s'.", player_key)
+        logger.error(f"{FAIL}{FAIL} No configuration found for player '%s'.", player_key)
         return False
 
     handler_name = f"Play_{player_key.lower()}"
     handler = globals().get(handler_name)
-
     if handler is None:
         logger.warning("Player '%s' is set in config, but handler '%s()' is not implemented.",
                        player_key, handler_name)
@@ -73,16 +85,16 @@ def PlayVideo(video_file: str) -> bool:
 
     # 🔁 Common pre-step
     if PlayerProcess and PlayerProcess.poll() is None:
-        logger.warning("Existing player detected, stopping it.")
+        logger.debug("{STOP} Existing player detected, stopping it.")
         StopPlayer()
         VideoBeingPlayed = ""
 
     # 🚀 Call player-specific launch function
-    success = handler(player_cfg, video_file)
+    success = handler(player_cfg, str(p))
 
     # ✅ Common post-step
     if success:
-        VideoBeingPlayed = video_file
+        VideoBeingPlayed = str(p)
     else:
         PlayerProcess = None
         VideoBeingPlayed = ""
@@ -131,28 +143,45 @@ def Play_vlc(player_cfg: Any, video_file: str) -> bool:
         logger.error("Failed to launch VLC: %s", e)
         return False
 
+#/////////////////////////////////////////////////////////////////////////////
+#
+DEFAULT_SLIDESHOW_DURATION_SECONDS: int = 4 * 60 * 60
+
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
+
+def _count_slides(show_dir: str | Path) -> int:
+    p = Path(show_dir)
+    try:
+        return sum(1 for f in p.iterdir() if f.is_file() and f.suffix.lower() in IMAGE_EXTS)
+    except FileNotFoundError:
+        return 0
+
+#/////////////////////////////////////////////////////////////////////////////
+#
 def Play_feh(player_cfg: Any, image_dir: str) -> bool:
     global PlayerProcess
+
+    n = _count_slides(image_dir)
+    if n == 0:
+        logger.warning("Slideshow '%s' has no images; nothing to play.", image_dir)
+        return False
+
+    duration = DEFAULT_SLIDESHOW_DURATION_SECONDS  # e.g., 4*60*60
+    sec = duration // n
+    if sec < 300:
+        sec = 300
+
     try:
-        img_path = Path(image_dir)
-        if not img_path.is_dir():
+        if not Path(image_dir).is_dir():
             logger.error("Play_feh: expected a directory, got: %s", image_dir)
             return False
 
         proc: str = player_cfg["proc"]
+        args: list[str] = [*player_cfg.get("args", []), "-D", str(sec)]
 
-        # First launch: trigger fullscreen mode under VNC
-        args_dbg: list[str] = player_cfg.get("args_dbg", [])
-        cmd_dbg: list[str] = [proc, *args_dbg, image_dir]
-        subprocess.Popen(cmd_dbg)
-        time.sleep(2)
-
-        # Second launch: real slideshow
-        args: list[str] = player_cfg.get("args", [])
         cmd: list[str] = [proc, *args, image_dir]
         PlayerProcess = subprocess.Popen(cmd)
-
-        logger.info("FEH slideshow launched with: %s", image_dir)
+        logger.info("FEH slideshow launched: %s (slides=%d, %ds/slide)", image_dir, n, sec)
         return True
 
     except Exception as e:

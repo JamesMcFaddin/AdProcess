@@ -10,12 +10,13 @@ import json
 import platform
 import subprocess
 
-from typing import Dict, Any, TypeVar, cast 
+from pathlib import Path
+from typing import TypeVar
+
+from typing import Dict, Any, cast 
 
 from AdConfigTypes import (
-    PlayerConfig,
     PlayListEntry,
-    PlayerArgs,
     ConfigDefaults
 )
 
@@ -34,7 +35,8 @@ configDefaults: dict[str, Any] = {
         "Sun": {"open": "12:00", "close": "2:00"},
     },
     "Players": {
-        "default": "vlc",
+        "vid_player": "vlc",
+        "dir_player": "feh",
         "vlc": {
             "proc": "vlc",
             "args": ["-f", "-I", "dummy", "--loop", "--no-video-title-show", "--no-osd", "--file-caching=3000"],
@@ -46,7 +48,7 @@ configDefaults: dict[str, Any] = {
         },
         "feh": {
             "proc": "feh",
-            "args": ["-F", "-Z", "-r", "-z", "-x", "-D", "900"],
+            "args": ["-F", "-Z", "-r", "-z", "--borderless", "-x"],
             "args_dbg": ["-Z", "-r", "-z", "-D", "1"],
             "stdout": subprocess.DEVNULL,
             "stderr": subprocess.DEVNULL,
@@ -117,33 +119,49 @@ def IsRaspberryPI() -> bool:
 
 T = TypeVar("T", covariant=False)
 
+DEFAULT_CONFIG_FILE = Path(__file__).parent / "config.default.json"
+
 def LoadConfig(cFile: str, defaults: T) -> T:
+    target_path = Path(cFile)
+
+    # Try loading existing config file
     try:
-        with open(cFile, 'r') as config_file:
+        with target_path.open('r') as config_file:
             return json.load(config_file)  # type: ignore[return-value]
     except Exception:
-        with open(cFile, 'w+') as config_file:
+        pass  # Fall through to try defaults
+
+    # Try loading from config.default.json
+    try:
+        with DEFAULT_CONFIG_FILE.open('r') as default_file:
+            return json.load(default_file)
+    except Exception:
+        pass  # If this fails, use the passed-in defaults
+
+    # Write out the fallback config (whichever one we got)
+    try:
+        with target_path.open('w+') as config_file:
             json.dump(defaults, config_file, indent=4)
             config_file.seek(0)
             return json.load(config_file)  # type: ignore[return-value]
+    except Exception:
+        # As a last resort, just return the in-memory defaults
+        return defaults
 
 #///////////////////////////////////////////////////////////////////////////////////////////////////
 
-HOME_DIR = os.environ.get("HOME", "/home/astepup") if IsRaspberryPI() else "my_windows_directory"
-CLOUD_DIR = f"{HOME_DIR}/Cloud"
-
-LocalPlayListFile = f"{HOME_DIR}/AdProcess/config/PlayList.json"
-CloudPlayListFile = f"{CLOUD_DIR}/AdPlayLists/{socket.gethostname()}PlayList.json"
-LocalConfigFile   = f"{HOME_DIR}/AdProcess/config/config.json"
-
-CONFIG: ConfigDefaults = cast(ConfigDefaults, LoadConfig(LocalConfigFile, configDefaults))
-PLAY_LIST: dict[str, PlayListEntry] = LoadConfig(LocalPlayListFile, DefaultPlayList)
+HOME_DIR    = os.environ.get("HOME", "/home/astepup") if IsRaspberryPI() else "C:/Users/A Step Up Lounge/OneDrive/Software/Python/pi/AStepUp"
+CLOUD_DIR   = f"{HOME_DIR}/Cloud"
+REMOTE_NAME = socket.gethostname()
 
 CLOUD_VIDEOS   = f"{CLOUD_DIR}/AdVideos"
 LOCAL_VIDEOS   = f"{HOME_DIR}/Videos"
+
 CLOUD_PICTURES = f"{CLOUD_DIR}/AdPictures"
 LOCAL_PICTURES = f"{HOME_DIR}/Pictures"
 
-players_dict: PlayerConfig = CONFIG["Players"]
-PLAYER_CFG: PlayerArgs = players_dict[players_dict["default"]]
+CLOUD_CONFIGS = f"{CLOUD_DIR}/Configs/{REMOTE_NAME}"
+LOCAL_CONFIGS = f"{HOME_DIR}/AdProcess/config"
 
+CONFIG: ConfigDefaults = cast(ConfigDefaults, LoadConfig(f"{LOCAL_CONFIGS}/config.json", configDefaults))
+PLAY_LIST: dict[str, PlayListEntry] = LoadConfig(f"{LOCAL_CONFIGS}/PlayList.json", DefaultPlayList)
