@@ -228,7 +228,7 @@ log "Setting up CIFS mount for ~/Cloud (password=, persistent)..."
 
 uid=$(id -u); gid=$(id -g)
 MOUNTPOINT="$HOME/Cloud"
-SHARE="//192.168.1.245/ADsCloud"
+SHARE="//OfficeDesktop/ADsCloud"
 # Keep your proven 'password=' approach; no username supplied.
 OPTS="password=,vers=3.0,uid=$uid,gid=$gid,file_mode=0664,dir_mode=0775,cache=none,_netdev,nofail"
 ENTRY="$SHARE  $MOUNTPOINT  cifs  $OPTS  0  0"

@@ -181,7 +181,7 @@ def Play_feh(player_cfg: Any, image_dir: str) -> bool:
 
         cmd: list[str] = [proc, *args, image_dir]
         PlayerProcess = subprocess.Popen(cmd)
-        logger.info("FEH slideshow launched: %s (slides=%d, %ds/slide)", image_dir, n, sec)
+        logger.info(f"{DONE} FEH slideshow launched: %s (slides=%d, %ds/slide)", image_dir, n, sec)
         return True
 
     except Exception as e:

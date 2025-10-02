@@ -37,7 +37,7 @@ def NormalizeTime(strTime: str, adjust: bool = True) -> int:
                 if 0 <= norm_time < 360: norm_time += 1440 
 
     except (ValueError, IndexError) as e:
-        logger.warning(f"{datetime.datetime.now()} - NormalizeTime failed: {e}")
+        logger.warning(f"{FAIL} {datetime.datetime.now()} - NormalizeTime failed: {e}")
 
     return norm_time
 
@@ -74,7 +74,7 @@ def ProcessPlayList() -> None:
                 continue
         else:
             if not os.path.isfile(video_path):
-                logger.warning(f"{WARN} Skipping {video}: local file missing ({video_path})")
+                logger.debug(f"{WARN} Skipping {video}: local file missing ({video_path})")
                 continue
 
         # 1. Start/End Date filtering

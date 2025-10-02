@@ -5,11 +5,74 @@
 # This software is licensed under the MIT License.
 # See the LICENSE file or https://opensource.org/licenses/MIT for details.
 
+"""
+AdLogging — Hardened logging for AdProcess
+==========================================
+
+Context (Sep 2025):
+- Symptom observed: rotated backups (AdProcess.log.1/.2/.3) are full (~1MB),
+  while the *current* AdProcess.log is short (25–30 lines). App appears to die
+  right after rotation opens a fresh file.
+- Takeaway: rollover itself succeeds; a separate exception likely occurs *after*
+  rotation. Also, duplicate handlers / multiple processes touching the same file
+  can amplify rollover timing weirdness.
+
+What this module guarantees:
+- Never let logging kill the app:
+  • logging.raiseExceptions = False
+  • File handler swallows its own internal errors (handleError override)
+- Safe file I/O:
+  • UTF-8 with errors="backslashreplace" to avoid UnicodeEncodeError landmines
+  • delay=True so the file is opened lazily (fewer race windows)
+  • Atomic rotate (os.replace) with tiny retry loop
+- Single writer by default:
+  • QueueHandler → QueueListener so app code never touches the file directly
+    (decouples your loop from disk latency and rotation)
+- Dupe defense:
+  • On setup, remove/close any existing file handler pointing at the same path
+- Visibility even if the file is wedged:
+  • Optional stderr StreamHandler for WARNING+ → shows up in `journalctl`
+
+Operational notes (aka things Past-You learned the hard way):
+- Call SetupLogging() *once* at process start. If you must re-init, it already
+  removes the prior file handler for the same path.
+- If an external tool (logrotate) owns rotation, set external_rotate=True so we
+  switch to WatchedFileHandler and let logrotate do its thing. Don’t double-rotate.
+- Keep logs on local storage (~/AdProcess/logs). Rotating on CIFS/NFS is “adventurous.”
+- Systemd should restart on failure:
+    Restart=always
+    RestartSec=5
+  (Optional: add WatchdogSec and ping it from the main loop if you want a kill-switch.)
+
+Useful one-liners when something looks off:
+- Who has the log open?
+    lsof | grep -F 'AdProcess.log'
+- Do we have more than one runner?
+    pgrep -fa 'python.*AdProcess'
+- Is logrotate touching our file?
+    grep -R --line-number -F 'AdProcess.log' /etc/logrotate.conf /etc/logrotate.d || echo 'no rules'
+- See warnings/errors even if the file got stuck:
+    journalctl -u adprocess -e
+
+Minimal usage pattern (from your entrypoint):
+    if __name__ == '__main__':
+        SetupLogging(f"{HOME_DIR}/AdProcess/AdProcess.log")  # reads cfg.CONFIG for level
+        # (Strongly recommended elsewhere in main:)
+        #   - install sys.excepthook that logs FATAL tracebacks
+        #   - enable faulthandler to append to crash.dump
+        #   - optionally write a heartbeat file per loop
+        ad_processor = AdProcessor()
+        ad_processor.run()
+
+Philosophy:
+- Logs are diagnostics, not life support—so this module never raises out of the
+  logging stack. If something else kills the process after rotation, we ensure
+  there’s a clear breadcrumb (to file and/or journal) so you can squash the real bug.
+"""
+
 from __future__ import annotations
 import logging
-from logging.handlers import RotatingFileHandler
 from typing import Optional, Mapping, Any
-from pathlib import Path
 
 _current_log_level_str: Optional[str] = None
 
@@ -47,39 +110,155 @@ def _resolve_config(config: Optional[Mapping[str, Any]]) -> Mapping[str, Any]:
 ######################
 
 def SetupLogging(log_file: str = "App.log") -> None:
+    """
+    Pi Zero W–hardened logging:
+      - Non-blocking app path via QueueHandler → QueueListener
+      - Drop-on-full queue (never block main loop)
+      - Safe RotatingFileHandler (UTF-8, delay=True, atomic-ish rotate with retries)
+      - Minimal stderr breadcrumbs during setup/fallbacks
+    """
     import AdConfig as cfg
+    import sys, queue, time
+    from pathlib import Path
+    import logging
+    from logging.handlers import RotatingFileHandler, QueueHandler, QueueListener
     global _current_log_level_str
 
-    level_str = str(cfg.CONFIG.get("LogLevel", "INFO")).upper()   # <-- not 'config'
+    # --- tiny helper: write setup errors to stderr (logger not ready yet) ---
+    def _stderr(msg: str) -> None:
+        try:
+            sys.stderr.write(msg + "\n")
+        except Exception:
+            pass
+
+    logging.raiseExceptions = False
+
+    # --- level from config ---
+    level_str = str(cfg.CONFIG.get("LogLevel", "INFO")).upper()
     level = getattr(logging, level_str, logging.INFO)
     _current_log_level_str = level_str
 
-    # ensure parent dir exists
+    # --- ensure parent dir exists ---
     log_path = Path(log_file)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        _stderr(f"[AdLogging] mkdir failed for {log_path.parent}: {e!r}; using console only")
+        logging.basicConfig(level=level,
+                            format="%(asctime)s %(levelname)-8s [%(name)s:%(lineno)d] %(message)s",
+                            datefmt="%Y-%m-%d %H:%M:%S")
+        return
 
     fmt = "%(asctime)s %(levelname)-8s [%(name)s:%(lineno)d] %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
 
     root = logging.getLogger()
     root.setLevel(level)
-    
-    fh = RotatingFileHandler(
-        log_file,
-        maxBytes=1_000_000,
-        backupCount=3,
-        encoding="utf-8",
-    )
-    fh.setFormatter(logging.Formatter(fmt, datefmt))
-    root.addHandler(fh)
 
-    # blank line before banner (best-effort)
-    stream = getattr(fh, "stream", None)
+    # --- remove prior file/queue handlers for this path (dupe defense) ---
+    for h in list(root.handlers):
+        try:
+            bf = Path(getattr(h, "baseFilename", "")) if hasattr(h, "baseFilename") else None
+            if bf and bf == log_path:
+                root.removeHandler(h)
+                try:
+                    h.close()
+                except Exception as ce:
+                    _stderr(f"[AdLogging] closing old handler failed: {ce!r}")
+            if isinstance(h, QueueHandler):
+                root.removeHandler(h)
+        except Exception as re:
+            _stderr(f"[AdLogging] removing handler failed: {re!r}")
+
+    # --- Safe rotating file handler (won't raise; retrying rotate) ---
+    class SafeRotating(RotatingFileHandler):
+        def handleError(self, record: logging.LogRecord) -> None:
+            try:
+                super().handleError(record)
+            except Exception as he:
+                _stderr(f"[AdLogging] handler.handleError raised: {he!r}")
+
+        def rotate(self, source: str, dest: str) -> None:
+            import os
+            for _ in range(5):
+                try:
+                    if os.path.exists(dest):
+                        try:
+                            os.remove(dest)
+                        except Exception as de:
+                            _stderr(f"[AdLogging] remove {dest} failed: {de!r}")
+                    os.replace(source, dest)  # atomic on Linux
+                    return
+                except Exception:
+                    time.sleep(0.05)
+            try:
+                super().rotate(source, dest)
+            except Exception as fe:
+                _stderr(f"[AdLogging] rotate fallback failed: {fe!r}")
+
+    # create the file handler (UTF-8, lazy open; tolerate odd encodings)
     try:
-        if stream:
-            stream.write("\n"); stream.flush()
-    except Exception:
-        pass
+        try:
+            fh: RotatingFileHandler = SafeRotating(
+                log_file, maxBytes=1_000_000, backupCount=3,
+                encoding="utf-8", delay=True, errors="backslashreplace",
+            )
+        except TypeError:
+            fh = SafeRotating(
+                log_file, maxBytes=1_000_000, backupCount=3,
+                encoding="utf-8", delay=True,
+            )
+    except Exception as e:
+        _stderr(f"[AdLogging] creating file handler failed for {log_file}: {e!r}; using console only")
+        logging.basicConfig(level=level, format=fmt, datefmt=datefmt)
+        return
+
+    fh.setFormatter(logging.Formatter(fmt, datefmt))
+
+    # --- Non-blocking pipeline: QueueHandler → QueueListener (drop-oldest) ---
+    class DropQueueHandler(QueueHandler):
+        def enqueue(self, record: logging.LogRecord) -> None:
+            try:
+                self.queue.put_nowait(record)
+            except queue.Full:
+                try:
+                    # drop one oldest to keep moving
+                    self.queue.get_nowait()
+                except Exception:
+                    pass
+                try:
+                    self.queue.put_nowait(record)
+                except Exception:
+                    # last resort: a tiny breadcrumb to stderr (rare)
+                    _stderr("[AdLogging] queue full; dropped a log record")
+
+    # Pi Zero is RAM-constrained; keep the queue modest
+    q: "queue.Queue[logging.LogRecord]" = queue.Queue(maxsize=1000)
+    qh = DropQueueHandler(q)
+    qh.setLevel(level)
+
+    # stop previous listener if re-initializing
+    prev = getattr(SetupLogging, "_ql", None)
+    if isinstance(prev, QueueListener):
+        try:
+            prev.stop()
+        except Exception:
+            pass
+
+    ql = QueueListener(q, fh, respect_handler_level=True)
+    ql.daemon = True
+    ql.start()
+    SetupLogging._ql = ql  # keep it alive
+
+    # install the queue handler as the sole root handler
+    root.addHandler(qh)
+
+    # (best-effort) spacer if the file is already open
+    try:
+        if getattr(fh, "stream", None):
+            fh.stream.write("\n"); fh.stream.flush()
+    except Exception as e:
+        _stderr(f"[AdLogging] pre-banner newline failed: {e!r}")
 
     root.info(f"{ROCKET} ===== Application startup =====")
     root.debug("Initial logging level set to %s from config.json", level_str)

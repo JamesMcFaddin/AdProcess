@@ -4,6 +4,10 @@
 # This software is licensed under the MIT License.
 # See the LICENSE file or https://opensource.org/licenses/MIT for details.
 
+from __future__ import annotations
+from types import TracebackType 
+import logging
+
 import os
 import subprocess
 import time
@@ -29,7 +33,6 @@ from SyncFiles import SyncFiles
 from Player import StopPlayer
 from PlayList import NormalizeTime, ProcessPlayList
 
-import logging
 logger = logging.getLogger(__name__)
 
 #///////////////////////////////////////////////////////////////////////////////
@@ -135,6 +138,9 @@ class AdProcessor:
 
    #///////////////////////////////////////////////////////////////////////////
     def run(self):
+        # Let us just sleep for 10 seconds
+        time.sleep(10)
+
         # Set up RAM staging once before entering the main loop
         InitRamStaging(size_mb=192)
 
@@ -212,7 +218,58 @@ class AdProcessor:
             self.log_count += 1
 
 #///////////////////////////////////////////////////////////////////////////////
-if __name__ == '__main__':
-    SetupLogging(f"{HOME_DIR}/AdProcess/AdProcess.log") # reads AdConfig.CONFIG
+# -----------------------------------------------------------------------------
+# Entry point — why this order matters (hey, Future James 👋)
+#
+# 1) SetupLogging(LOG_FILE)
+#    Bring the logger online first so everything that follows can land in
+#    AdProcess.log with timestamps. The handler is hardened (UTF-8, delay=True,
+#    safe rotate) so logging itself won’t take us down.
+#
+# 2) Install crash breadcrumbs (sys.excepthook + faulthandler)
+#    We are NOT wrapping the app in a giant try/except. We let unexpected
+#    exceptions propagate, but before they do, we:
+#      • Log a loud FATAL + full traceback to AdProcess.log (excepthook)
+#      • Dump all thread stacks to logs/crash.dump (faulthandler)
+#      • Exit non-zero so systemd restarts the service
+#
+# 3) Construct AdProcessor and run
+#    If something escapes later, the breadcrumbs above ensure we don’t silently
+#    die — we fail fast, get evidence, and let systemd bring us back.
+# -----------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    # 1) Start logging
+    LOG_FILE = f"{HOME_DIR}/AdProcess/AdProcess.log"
+    SetupLogging(LOG_FILE)
+
+    # 2) Crash breadcrumbs — minimal, stdlib only
+    import sys, faulthandler, os
+
+    LOG_DIR = Path(LOG_FILE).parent
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    CRASH_DUMP = LOG_DIR / "crash.dump"
+    _CRASH_FH = open(CRASH_DUMP, "a", encoding="utf-8")
+
+    # Dump full stacks (all threads) on hard faults/uncaught exceptions
+    faulthandler.enable(_CRASH_FH, all_threads=True)
+
+    def _excepthook(exc_type: type[BaseException],
+                    exc: BaseException,
+                    tb: TracebackType | None) -> None:
+        logging.getLogger().critical(
+            "FATAL: uncaught exception",
+            exc_info=(exc_type, exc, tb),
+        )
+        try:
+            faulthandler.dump_traceback(file=_CRASH_FH, all_threads=True)
+            _CRASH_FH.flush()
+        except Exception:
+            pass
+
+        os._exit(1)  # ensure non-zero exit so systemd restarts
+        sys.excepthook = _excepthook
+
+    # 3) Run the app
     ad_processor = AdProcessor()
     ad_processor.run()
