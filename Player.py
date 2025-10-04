@@ -65,7 +65,7 @@ def PlayVideo(target: str) -> bool:
         logger.error(f"{FAIL} CONFIG.Players missing.")
         return False
 
-    selector_key = "dir_player" if p.is_dir() else "vid_player"
+    selector_key = "vid_player"
     player_key = players.get(selector_key)
     if not player_key:
         logger.error("CONFIG.Players['%s'] not set IN '%s'", selector_key, player_key)
@@ -83,7 +83,7 @@ def PlayVideo(target: str) -> bool:
                        player_key, handler_name)
         return False
 
-    # 🔁 Common pre-step
+    # 🔁 If anything is currently playing, stop it
     if PlayerProcess and PlayerProcess.poll() is None:
         logger.debug("{STOP} Existing player detected, stopping it.")
         StopPlayer()
@@ -109,23 +109,25 @@ def Play_vlc(player_cfg: Any, video_file: str) -> bool:
 
     try:
         proc: str = player_cfg["proc"]
-        if IsRaspberryPI() and proc == "vlc":
-            proc = "/usr/bin/cvlc"
+        env = os.environ.copy()
+        
+        if IsRaspberryPI():
+            env.update({
+                "DISPLAY": ":0",
+                "HOME": "/home/astepup",
+                "XAUTHORITY": "/home/astepup/.Xauthority",
+                "XDG_RUNTIME_DIR": "/run/user/1000",
+                "PULSE_SERVER": "unix:/run/user/1000/pulse/native"
+            })
+
+            if proc == "vlc":
+                proc = "/usr/bin/cvlc"
 
         args: list[str] = player_cfg["args_dbg"] if debug else player_cfg["args"]
         cmd: list[str] = [proc, *args, video_file]
 
         stdout: int | None = player_cfg.get("stdout", subprocess.DEVNULL)
         stderr: int | None = player_cfg.get("stderr", subprocess.STDOUT)
-
-        env = os.environ.copy()
-        env.update({
-            "DISPLAY": ":0",
-            "HOME": "/home/astepup",
-            "XAUTHORITY": "/home/astepup/.Xauthority",
-            "XDG_RUNTIME_DIR": "/run/user/1000",
-            "PULSE_SERVER": "unix:/run/user/1000/pulse/native"
-        })
 
         logger.info("Launching VLC: %s", cmd)
         PlayerProcess = subprocess.Popen(cmd, env=env, stdout=stdout, stderr=stderr)

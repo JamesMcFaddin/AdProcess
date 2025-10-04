@@ -7,9 +7,10 @@
 import datetime
 import logging
 import os
+from pathlib import Path
 
 from AdLogging import *
-from AdConfig import PLAY_LIST, LOCAL_VIDEOS, LOCAL_PICTURES
+from AdConfig import PLAY_LIST, LOCAL_VIDEOS
 from Player import PlayVideo, GetCurrentlyPlaying
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,6 @@ def ProcessPlayList() -> None:
     time_now = now.time()
 
     useThis: str = ""
-
     entries = list(PLAY_LIST.values())
 
     for entry in entries:
@@ -59,23 +59,12 @@ def ProcessPlayList() -> None:
         if not video:
             continue
 
-        # Per-entry type and base path
-        is_directory_entry = video.endswith("/")
-        base_path = LOCAL_PICTURES if is_directory_entry else LOCAL_VIDEOS
+        # Normalize path
+        video_path = os.path.join(LOCAL_VIDEOS, video)
 
-        # Normalize path (strip trailing slash for joins)
-        video_norm = video[:-1] if is_directory_entry and video.endswith("/") else video
-        video_path = os.path.join(base_path, video_norm)
-
-        # Existence check
-        if is_directory_entry:
-            if not os.path.isdir(video_path):
-                logger.warning(f"{WARN} Skipping {video}: local directory missing ({video_path})")
-                continue
-        else:
-            if not os.path.isfile(video_path):
-                logger.debug(f"{WARN} Skipping {video}: local file missing ({video_path})")
-                continue
+        if not os.path.isfile(video_path):
+            logger.debug(f"{WARN} Skipping {video}: local file missing ({video_path})")
+            continue
 
         # 1. Start/End Date filtering
         start_date_str = (entry.get("start_date") or "").strip()
@@ -123,7 +112,7 @@ def ProcessPlayList() -> None:
                 continue
 
         # 4. ThisWeekOnly — skip if directory mode
-        if not is_directory_entry and entry.get("repeat", "").strip().lower() == "thisweekonly":
+        if entry.get("repeat", "").strip().lower() == "thisweekonly":
             try:
                 mtime = datetime.datetime.fromtimestamp(os.path.getmtime(video_path)).date()
                 now_week = today.isocalendar()[1]
@@ -141,11 +130,11 @@ def ProcessPlayList() -> None:
         useThis = video_path
 
     currently_playing = GetCurrentlyPlaying()
+    useThis = str(Path(useThis))
 
     # Final playback decision — restart only if something new is selected.
     # Do NOT check for file changes — sync_files() already ensures everything is up to date.
     # (Yes, past-me tried this. No, it wasn't necessary. You're welcome.)
     if useThis and currently_playing != useThis:
-        mode = "slideshow" if os.path.isdir(useThis) else "video"
-        logger.info(f"{PLAY} Restarting {mode}: {useThis}")
+        logger.info(f"{PLAY} Restarting video: {useThis}")
         PlayVideo(useThis)

@@ -150,15 +150,12 @@ def LoadConfig(cFile: str, defaults: T) -> T:
 
 #///////////////////////////////////////////////////////////////////////////////////////////////////
 
-HOME_DIR    = os.environ.get("HOME", "/home/astepup") if IsRaspberryPI() else "C:/Users/A Step Up Lounge/OneDrive/Software/Python/pi/AStepUp"
-CLOUD_DIR   = f"{HOME_DIR}/Cloud"
+HOME_DIR    = os.environ.get("HOME", "/home/astepup") if IsRaspberryPI() else "C:/Users/Jmcfa/OneDrive/Software/Projects/AStepUp"
+CLOUD_DIR   = Path(HOME_DIR).parent / "Cloud"
 REMOTE_NAME = socket.gethostname()
 
 CLOUD_VIDEOS   = f"{CLOUD_DIR}/AdVideos"
 LOCAL_VIDEOS   = f"{HOME_DIR}/Videos"
-
-CLOUD_PICTURES = f"{CLOUD_DIR}/AdPictures"
-LOCAL_PICTURES = f"{HOME_DIR}/Pictures"
 
 CLOUD_CONFIGS = f"{CLOUD_DIR}/Configs/{REMOTE_NAME}"
 LOCAL_CONFIGS = f"{HOME_DIR}/AdProcess/config"

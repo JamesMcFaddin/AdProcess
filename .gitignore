@@ -20,8 +20,10 @@ src/AdProcess.log
 #------------------------------------------------------------------------------
 # Auto-generated config files
 #------------------------------------------------------------------------------
-Config.json
+config.json
+config.json.lastgood
 PlayList.json
+PlayList.json.lastgood
 
 #------------------------------------------------------------------------------
 # OS-specific cruft

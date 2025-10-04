@@ -5,7 +5,6 @@
 # See the LICENSE file or https://opensource.org/licenses/MIT for details.
 
 from __future__ import annotations
-from types import TracebackType 
 import logging
 
 import os
@@ -15,7 +14,6 @@ import datetime
 
 from pathlib import Path
 from typing import cast
-from RamStaging import InitRamStaging
 
 import sys, threading
 _tracer = sys.gettrace()
@@ -23,7 +21,7 @@ if _tracer is not None:
     threading.settrace(_tracer)
 
 from AdLogging import *
-from AdLogging import SetupLogging, LogSnapshot
+from AdLogging import SetupLogging
 
 from AdConfig import IsRaspberryPI, HOME_DIR
 from AdConfig import CONFIG, PLAY_LIST, LOCAL_VIDEOS
@@ -42,7 +40,6 @@ class AdProcessor:
     close_minutes: int
 
     CHECK_INTERVAL = 60
-    SYNC_INTERVAL  = 60 * 60
 
     def __init__(self):
         self._last_playlist_mtime = 0
@@ -98,8 +95,8 @@ class AdProcessor:
         self.open_minutes  = NormalizeTime(hours["open"])
         self.close_minutes = NormalizeTime(hours["close"])
 
-#///////////////////////////////////////////////////////////////////////////////
-#
+    #///////////////////////////////////////////////////////////////////////////////
+    #
     def remove_stale_files(self) -> None:
         local_dir = Path(LOCAL_VIDEOS)
 
@@ -136,16 +133,13 @@ class AdProcessor:
 
         subprocess.run(cmd, check=True)
 
-   #///////////////////////////////////////////////////////////////////////////
+   #////////////////////////////////////////////////////////////////////////////
+   #
     def run(self):
         # Let us just sleep for 10 seconds
         time.sleep(10)
-
-        # Set up RAM staging once before entering the main loop
-        InitRamStaging(size_mb=192)
-
+        wake_time = 0
         self.turn_display(True)
-        self.log_count = 0
 
         while True:
             # 🔌 External quit trigger
@@ -156,120 +150,38 @@ class AdProcessor:
                 os.remove((Path(HOME_DIR) / "quit"))
                 sys.exit(0)
 
-            # Memory available snap shot
-            LogSnapshot("loop-start")   # <-- baseline before any work
-
-            if self.log_count > 60:
-                logger.info("***********  Chugging right along...  ***********")
-                self.log_count = 0
-
             # 💤 Are we closed right now?
-            if not self.is_open():
+            if wake_time == 0 and not self.is_open():
                 logger.info("Closed. Going to sleep untill we open...")
                 StopPlayer()
                 self.turn_display(False)
 
                 wake_time = self.compute_wake_time(offset_minutes=-30)
-                sync_timer = time.time()
 
-                while True:
-                    now = self.current_minutes()
+            if wake_time != 0:
+                if self.current_minutes() >= wake_time:
+                    logger.info(f"{DONE} Sleep over, rebooting...")
 
-                    if now >= wake_time:
-                        break
+                    self.remove_stale_files()
+                    SyncFiles()
+                    self.reboot_system()
 
-                    if (Path(HOME_DIR) / "quit").exists():
-                        logger.info("Detected quit file during sleep. Exiting.")
-                        StopPlayer()
-                        self.turn_display(True)
-                        os.remove((Path(HOME_DIR) / "quit"))
-                        sys.exit(0)
-
-                    if time.time() - sync_timer >= self.SYNC_INTERVAL:
-                        # Memory available snap shot
-                        LogSnapshot("loop-start")   # <-- baseline before any work
-
-                        SyncFiles()
-                        logger.debug(f"{DONE} ****** Syncing files done")
-                        sync_timer = time.time()
-
-                    time.sleep(self.CHECK_INTERVAL)
-
-                logger.info(f"{DONE} Sleep over, rebooting...")
-
-                try:
-                    out = subprocess.check_output("grep ' mmcblk0 ' /proc/diskstats",
-                                                shell=True, text=True).strip()
-                    logger.info("diskstats: %s", out)
-                except Exception as e:
-                    logger.warning("diskstats read failed: %s", e)
-
-                self.remove_stale_files()
-                SyncFiles()
-                self.reboot_system()
-
-            ProcessPlayList()
-            logger.debug(f"{DONE} ********** Processing PlayList done")
+            else:
+                ProcessPlayList()
+                logger.debug(f"{DONE} ********** Processing PlayList done")
 
             SyncFiles()
             logger.debug(f"{DONE} ****** Syncing files done")
 
             time.sleep(self.CHECK_INTERVAL)
-            self.log_count += 1
 
 #///////////////////////////////////////////////////////////////////////////////
-# -----------------------------------------------------------------------------
-# Entry point — why this order matters (hey, Future James 👋)
 #
-# 1) SetupLogging(LOG_FILE)
-#    Bring the logger online first so everything that follows can land in
-#    AdProcess.log with timestamps. The handler is hardened (UTF-8, delay=True,
-#    safe rotate) so logging itself won’t take us down.
-#
-# 2) Install crash breadcrumbs (sys.excepthook + faulthandler)
-#    We are NOT wrapping the app in a giant try/except. We let unexpected
-#    exceptions propagate, but before they do, we:
-#      • Log a loud FATAL + full traceback to AdProcess.log (excepthook)
-#      • Dump all thread stacks to logs/crash.dump (faulthandler)
-#      • Exit non-zero so systemd restarts the service
-#
-# 3) Construct AdProcessor and run
-#    If something escapes later, the breadcrumbs above ensure we don’t silently
-#    die — we fail fast, get evidence, and let systemd bring us back.
-# -----------------------------------------------------------------------------
-
 if __name__ == "__main__":
     # 1) Start logging
     LOG_FILE = f"{HOME_DIR}/AdProcess/AdProcess.log"
     SetupLogging(LOG_FILE)
 
-    # 2) Crash breadcrumbs — minimal, stdlib only
-    import sys, faulthandler, os
-
-    LOG_DIR = Path(LOG_FILE).parent
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    CRASH_DUMP = LOG_DIR / "crash.dump"
-    _CRASH_FH = open(CRASH_DUMP, "a", encoding="utf-8")
-
-    # Dump full stacks (all threads) on hard faults/uncaught exceptions
-    faulthandler.enable(_CRASH_FH, all_threads=True)
-
-    def _excepthook(exc_type: type[BaseException],
-                    exc: BaseException,
-                    tb: TracebackType | None) -> None:
-        logging.getLogger().critical(
-            "FATAL: uncaught exception",
-            exc_info=(exc_type, exc, tb),
-        )
-        try:
-            faulthandler.dump_traceback(file=_CRASH_FH, all_threads=True)
-            _CRASH_FH.flush()
-        except Exception:
-            pass
-
-        os._exit(1)  # ensure non-zero exit so systemd restarts
-        sys.excepthook = _excepthook
-
-    # 3) Run the app
+    # 2) Run the app
     ad_processor = AdProcessor()
     ad_processor.run()
