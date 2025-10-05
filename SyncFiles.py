@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 
 #///////////////////////////////////////////////////////////////////////////////
 #
-
 def _mtime(p: Path) -> float:
     try:
         return p.stat().st_mtime
@@ -85,7 +84,16 @@ def _persist_last_good_and_apply(dst: Path, obj: object) -> bool:
     return True
 
 #/////////
-
+#
+# Syncs the .json files use for configuration. This function is called with the
+# .json filename and the associated defaults. There are four separaate config
+# files, at any particular time they may or may not be all the same.
+#
+#   1) The Cloud config file
+#   2) The Local config file
+#   3) The Last Good config file, which via sync becomes the most receent.
+#   4) The In Memory config. which via sync will mirror the Last Good file
+#
 def sync_common(basename: str, defaults: object) -> bool:
     try:
         from AdConfig import LoadConfig  # ok to import here; it "always returns"

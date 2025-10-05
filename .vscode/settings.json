@@ -1,4 +1,5 @@
 {
     "git.requireGitUserConfig": false,
-    "python.analysis.typeCheckingMode": "strict"
+    "python.analysis.typeCheckingMode": "strict",
+    "editor.fontSize": 16
 }
