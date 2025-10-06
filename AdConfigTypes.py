@@ -4,7 +4,7 @@
 # This software is licensed under the MIT License.
 # See the LICENSE file or https://opensource.org/licenses/MIT for details.
 
-from typing import TypedDict, Optional, Any
+from typing import TypedDict, Optional, Any, MutableMapping
 
 class DayHours(TypedDict):
     open: str  # Format: "HH:MM"
@@ -52,3 +52,12 @@ class ConfigDefaults(TypedDict):
     OpenHours: OpenHours
     Players: PlayerConfig
     LogLevel: str
+
+class VenuePlaylist(TypedDict):
+    name: str
+    entries: MutableMapping[str, PlayListEntry]  # will actually be OrderedDict at runtime
+
+class PlayListDoc(TypedDict):
+    Media: dict[str, Any]
+    Venue: VenuePlaylist
+    SchemaVersion: int

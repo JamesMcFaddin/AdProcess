@@ -5,13 +5,14 @@
 # See the LICENSE file or https://opensource.org/licenses/MIT for details.
 
 from pathlib import Path
-import shutil, sys, json, contextlib, tempfile, os
+import shutil, sys, contextlib
 from typing import Any, Mapping, MutableMapping, cast
+from collections import OrderedDict
 
 _tracer = sys.gettrace()
 
-from AdConfig import PLAY_LIST
-from AdConfig import CLOUD_VIDEOS, LOCAL_VIDEOS
+from AdConfig import AtomicWrite_json, LoadConfigOnly
+from AdConfig import CLOUD_VIDEOS, LOCAL_VIDEOS, Lastgood_path
 import AdConfig as cfg  # <- use module-qualified access everywhere
 
 from Player import PlayVideo, GetCurrentlyPlaying
@@ -36,46 +37,24 @@ def _mtime(p: Path) -> float:
 
 #/////////
 
-def _write_json_atomic(dst: Path, obj: object) -> bool:
-    """Write known-good JSON (already in memory) via temp+replace. Parent exists by contract."""
-    try:
-        with tempfile.NamedTemporaryFile("w", delete=False, dir=str(dst.parent),
-                                         prefix=dst.name + ".", suffix=".tmp") as f:
-            
-            json.dump(obj, f, indent=2, sort_keys=True)
-            f.flush(); os.fsync(f.fileno())
-            tmp = Path(f.name)
-
-        tmp.replace(dst)
-        return True
-    
-    except Exception as e:
-        logger.error("Persist last_good failed (%s): %s", dst, e)
-        return False
-    finally:
-        with contextlib.suppress(Exception):
-            tmp.unlink()  # type: ignore[name-defined]
-
-#/////////
-
-def _persist_last_good_and_apply(dst: Path, obj: object) -> bool:
+def _persist_last_good_and_apply(dst: Path, default: OrderedDict[str, Any]) -> bool:
     """Write obj to dst atomically, then update AdConfig in-memory if dst is a last_good file."""
-    if not _write_json_atomic(dst, obj):
+    if not AtomicWrite_json(dst, default):
         return False
     try:
         import AdConfig as cfg
         fname = dst.name  # e.g., "config.json.lastgood" or "PlayList.json.lastgood"
 
-        if fname == "config.json.lastgood":
+        if fname == "config.lastgood.json":
             # in-place mutate so 'from AdConfig import CONFIG' stays live
             cur = cast(MutableMapping[str, Any], cfg.CONFIG)
-            new = cast(Mapping[str, Any], obj)
+            new = cast(Mapping[str, Any], default)
             cur.clear()                  # pyright: ignore[reportUnknownMemberType]
             cur.update(new)              # pyright: ignore[reportUnknownArgumentType,reportUnknownMemberType]
 
-        elif fname == "PlayList.json.lastgood":
+        elif fname == "PlayList.lastgood.json":
             cur = cast(MutableMapping[str, Any], cfg.PLAY_LIST)
-            new = cast(Mapping[str, Any], obj)
+            new = cast(Mapping[str, Any], default)
             cur.clear()                  # pyright: ignore[reportUnknownMemberType]
             cur.update(new)              # pyright: ignore[reportUnknownArgumentType,reportUnknownMemberType]
 
@@ -94,14 +73,14 @@ def _persist_last_good_and_apply(dst: Path, obj: object) -> bool:
 #   3) The Last Good config file, which via sync becomes the most receent.
 #   4) The In Memory config. which via sync will mirror the Last Good file
 #
-def sync_common(basename: str, defaults: object) -> bool:
+def sync_common(basename: str, defaults: OrderedDict[str, Any]) -> bool:
     try:
         from AdConfig import LoadConfig  # ok to import here; it "always returns"
 
         # Derive paths (module-qualified to avoid NameError)
         cloud     = Path(cfg.CLOUD_CONFIGS) / basename
         local     = Path(cfg.LOCAL_CONFIGS) / basename
-        last_good = Path(cfg.LOCAL_CONFIGS) / (basename + ".lastgood")
+        last_good = Lastgood_path(Path(cfg.LOCAL_CONFIGS) / basename)
 
         # Ensure parent exists before any writes
         try:
@@ -146,7 +125,7 @@ def sync_common(basename: str, defaults: object) -> bool:
             finally:
                 with contextlib.suppress(Exception): tmp.unlink()
 
-            if _persist_last_good_and_apply(last_good, obj):
+            if _persist_last_good_and_apply(last_good, defaults):
                 logger.info("[%s] Applied from cloud → last_good", basename)
                 return True
             return False
@@ -156,7 +135,7 @@ def sync_common(basename: str, defaults: object) -> bool:
             return False
 
         if winner == "local":
-            obj = LoadConfig(str(local), defaults)
+            obj = LoadConfigOnly(str(local), defaults)
             if _persist_last_good_and_apply(last_good, obj):
                 logger.info("[%s] Applied from local → last_good", basename)
                 return True
@@ -180,12 +159,11 @@ def SyncConfigs() -> None:
     Side-effects only; logging happens inside sync_common().
     """
 
-    from AdConfig import CONFIG as DefaultConfig, DefaultPlayList
-
-    if sync_common("config.json", DefaultConfig):
+    if sync_common("config.json", cast(OrderedDict[str, Any], cfg.CONFIG)):
         ConfigChange()   # ← only when config actually applied
 
-    sync_common("PlayList.json", DefaultPlayList)  # then sync playlist using the current REMOTE_NAME
+    # then sync playlist using the current REMOTE_NAME
+    sync_common("PlayList.json", cast(OrderedDict[str, Any], cfg.PLAY_LIST))
 
     logger.debug("      ********** Done **********")
 
@@ -199,9 +177,7 @@ def SyncFiles() -> None:
     cloud_video_dir = Path(CLOUD_VIDEOS)
     currently_being_played = GetCurrentlyPlaying()
 
-    entries = list(PLAY_LIST.values())
-    if not entries:
-        return
+    entries = list(cfg.PLAY_LIST["Venue"]["entries"].values())
 
     for entry in entries:
         if not isinstance(entry, dict): # type: ignore defensive
@@ -255,4 +231,3 @@ def SyncFiles() -> None:
                 except Exception as e2:
                     logger.error("Error cleaning up SD temp %s: %s", sd_tmp, e2)
             continue  # scan next entry; will retry next pass
-

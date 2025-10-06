@@ -21,9 +21,9 @@ src/AdProcess.log
 # Auto-generated config files
 #------------------------------------------------------------------------------
 config.json
-config.json.lastgood
+config.lastgood.json
 PlayList.json
-PlayList.json.lastgood
+PlayList.lastgood.json
 
 #------------------------------------------------------------------------------
 # OS-specific cruft

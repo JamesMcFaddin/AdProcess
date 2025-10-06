@@ -15,32 +15,26 @@ from Player import PlayVideo, GetCurrentlyPlaying
 
 logger = logging.getLogger(__name__)
 
-#/////////////////////////////////////////////////////////////////////////////
-# Converts a time in HH:MM in 24 hour format into an integer
+#///////////////////////////////////////////////////////////////////////////////
+# Converts a time in HH:MM in, 24 hour format, into an integer minutes
 #   Args:
-#     strTime: A 24 hour time in HH:MM format
-#     adjust:  If the time is between midnight and 6am it is treated as
-#     the previous day i.e. "1:45" is treated as 23:45
+#     strTime:   A 24 hour time in HH:MM format
+#     adjust:    If the time is between midnight and the tthreshold it is
+#                treated as the previous day i.e. "1:45" is treated as 23:45
+#     threshold: The time of day that ends tthe previous day.
 
 #   Returns:
 #       An integer representing the number of minutes.
 
-def NormalizeTime(strTime: str, adjust: bool = True) -> int:
-    norm_time = 0
-
-    try:
-        if strTime:
-            hours, minutes = map(int, strTime.strip().split(":"))
-            norm_time = hours * 60 + minutes
-
-            # Adjust early-morning times (e.g., 2:30 AM) to be treated as late-night
-            if adjust:
-                if 0 <= norm_time < 360: norm_time += 1440 
-
-    except (ValueError, IndexError) as e:
-        logger.warning(f"{FAIL} {datetime.datetime.now()} - NormalizeTime failed: {e}")
-
-    return norm_time
+def NormalizeTime(strTime: str, adjust: bool = True, threshold: int = 6) -> int:
+    if not strTime:
+        return -1  # sentinel for "unset"
+    
+    hours, minutes = map(int, strTime.split(":"))
+    if adjust and 0 <= hours < threshold:
+        hours += 24
+    
+    return hours * 60 + minutes
 
 #/////////////////////////////////////////////////////////////////////////////
 def ProcessPlayList() -> None:
@@ -52,7 +46,7 @@ def ProcessPlayList() -> None:
     time_now = now.time()
 
     useThis: str = ""
-    entries = list(PLAY_LIST.values())
+    entries = list(PLAY_LIST["Venue"]["entries"].values())
 
     for entry in entries:
         video = str(entry.get("video", "")).strip()

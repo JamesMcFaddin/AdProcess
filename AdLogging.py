@@ -71,8 +71,15 @@ Philosophy:
 """
 
 from __future__ import annotations
-import logging
-from typing import Optional, Mapping, Any
+from typing import Optional, Mapping, Any, cast
+
+import AdConfig as cfg
+import sys, queue, time, logging
+from pathlib import Path
+from logging.handlers import RotatingFileHandler, QueueHandler, QueueListener
+from logging.handlers import QueueListener as _QueueListener
+
+_ql: Optional[_QueueListener] = None  # ← top-level binding
 
 _current_log_level_str: Optional[str] = None
 
@@ -108,7 +115,6 @@ def _resolve_config(config: Optional[Mapping[str, Any]]) -> Mapping[str, Any]:
     return getattr(cfg, "CONFIG", {}) or {}
 
 ######################
-
 def SetupLogging(log_file: str = "App.log") -> None:
     """
     Pi Zero W–hardened logging:
@@ -117,14 +123,10 @@ def SetupLogging(log_file: str = "App.log") -> None:
       - Safe RotatingFileHandler (UTF-8, delay=True, atomic-ish rotate with retries)
       - Minimal stderr breadcrumbs during setup/fallbacks
     """
-    import AdConfig as cfg
-    import sys, queue, time
-    from pathlib import Path
-    import logging
-    from logging.handlers import RotatingFileHandler, QueueHandler, QueueListener
+
     global _current_log_level_str
 
-    # --- tiny helper: write setup errors to stderr (logger not ready yet) ---
+    # --- tiny helper for early errors ---
     def _stderr(msg: str) -> None:
         try:
             sys.stderr.write(msg + "\n")
@@ -136,7 +138,6 @@ def SetupLogging(log_file: str = "App.log") -> None:
     # --- level from config ---
     level_str = str(cfg.CONFIG.get("LogLevel", "INFO")).upper()
     level = getattr(logging, level_str, logging.INFO)
-    _current_log_level_str = level_str
 
     # --- ensure parent dir exists ---
     log_path = Path(log_file)
@@ -144,14 +145,15 @@ def SetupLogging(log_file: str = "App.log") -> None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
     except Exception as e:
         _stderr(f"[AdLogging] mkdir failed for {log_path.parent}: {e!r}; using console only")
-        logging.basicConfig(level=level,
-                            format="%(asctime)s %(levelname)-8s [%(name)s:%(lineno)d] %(message)s",
-                            datefmt="%Y-%m-%d %H:%M:%S")
+        logging.basicConfig(
+            level=level,
+            format="%(asctime)s %(levelname)-8s [%(name)s:%(lineno)d] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
         return
 
     fmt = "%(asctime)s %(levelname)-8s [%(name)s:%(lineno)d] %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
-
     root = logging.getLogger()
     root.setLevel(level)
 
@@ -163,14 +165,14 @@ def SetupLogging(log_file: str = "App.log") -> None:
                 root.removeHandler(h)
                 try:
                     h.close()
-                except Exception as ce:
-                    _stderr(f"[AdLogging] closing old handler failed: {ce!r}")
+                except Exception:
+                    pass
             if isinstance(h, QueueHandler):
                 root.removeHandler(h)
-        except Exception as re:
-            _stderr(f"[AdLogging] removing handler failed: {re!r}")
+        except Exception:
+            pass
 
-    # --- Safe rotating file handler (won't raise; retrying rotate) ---
+    # --- Safe rotating file handler ---
     class SafeRotating(RotatingFileHandler):
         def handleError(self, record: logging.LogRecord) -> None:
             try:
@@ -196,14 +198,14 @@ def SetupLogging(log_file: str = "App.log") -> None:
             except Exception as fe:
                 _stderr(f"[AdLogging] rotate fallback failed: {fe!r}")
 
-    # create the file handler (UTF-8, lazy open; tolerate odd encodings)
+    # create the file handler
     try:
         try:
             fh: RotatingFileHandler = SafeRotating(
                 log_file, maxBytes=1_000_000, backupCount=3,
                 encoding="utf-8", delay=True, errors="backslashreplace",
             )
-        except TypeError:
+        except TypeError:  # older Python: no 'errors='
             fh = SafeRotating(
                 log_file, maxBytes=1_000_000, backupCount=3,
                 encoding="utf-8", delay=True,
@@ -215,52 +217,49 @@ def SetupLogging(log_file: str = "App.log") -> None:
 
     fh.setFormatter(logging.Formatter(fmt, datefmt))
 
-    # --- Non-blocking pipeline: QueueHandler → QueueListener (drop-oldest) ---
+    # --- Non-blocking: QueueHandler → QueueListener (drop-oldest) ---
     class DropQueueHandler(QueueHandler):
         def enqueue(self, record: logging.LogRecord) -> None:
+            q = cast("queue.Queue[logging.LogRecord]", self.queue)
             try:
-                self.queue.put_nowait(record)
+                q.put(record, block=False)
             except queue.Full:
                 try:
-                    # drop one oldest to keep moving
-                    self.queue.get_nowait()
-                except Exception:
+                    q.get(block=False)  # drop oldest
+                except queue.Empty:
                     pass
                 try:
-                    self.queue.put_nowait(record)
-                except Exception:
-                    # last resort: a tiny breadcrumb to stderr (rare)
+                    q.put(record, block=False)
+                except queue.Full:
                     _stderr("[AdLogging] queue full; dropped a log record")
 
-    # Pi Zero is RAM-constrained; keep the queue modest
     q: "queue.Queue[logging.LogRecord]" = queue.Queue(maxsize=1000)
     qh = DropQueueHandler(q)
     qh.setLevel(level)
 
-    # stop previous listener if re-initializing
-    prev = getattr(SetupLogging, "_ql", None)
-    if isinstance(prev, QueueListener):
+    # stop previous listener if re-initializing (module-level handle)
+    global _ql
+    if _ql is not None:
         try:
-            prev.stop()
+            _ql.stop()
         except Exception:
             pass
 
     ql = QueueListener(q, fh, respect_handler_level=True)
-    ql.daemon = True
     ql.start()
-    SetupLogging._ql = ql  # keep it alive
+    _ql = ql  # keep it alive
 
     # install the queue handler as the sole root handler
     root.addHandler(qh)
 
-    # (best-effort) spacer if the file is already open
+    # spacer if the file is already open
     try:
         if getattr(fh, "stream", None):
             fh.stream.write("\n"); fh.stream.flush()
-    except Exception as e:
-        _stderr(f"[AdLogging] pre-banner newline failed: {e!r}")
+    except Exception:
+        pass
 
-    root.info(f"{ROCKET} ===== Application startup =====")
+    root.info("===== Application startup =====")
     root.debug("Initial logging level set to %s from config.json", level_str)
 
 ######################

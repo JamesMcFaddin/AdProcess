@@ -39,7 +39,7 @@ class AdProcessor:
     open_minutes: int
     close_minutes: int
 
-    CHECK_INTERVAL = 60
+    CHECK_INTERVAL = 30
 
     def __init__(self):
         self._last_playlist_mtime = 0
@@ -101,17 +101,23 @@ class AdProcessor:
         local_dir = Path(LOCAL_VIDEOS)
 
         try:
-            # PLAY_LIST is JSON-based and may contain non-dict entries
-            valid_names = {
-                str(entry.get("video", "")).strip()
-                for entry in PLAY_LIST.values()
-                if isinstance(entry, dict) and entry.get("video")  # type: ignore[redundant-expr]
-            }
+        # Collect the filenames actually referenced by the playlist (priority mapping).
+            valid_names: set[str] = set()
+            entries = list(PLAY_LIST["Venue"]["entries"].values())
 
+            for entry in entries:
+                video = str(entry.get("video", "")).strip()
+                if video:
+                    valid_names.add(video)  # just the basename
+
+            # Prune anything in local_dir that isn’t referenced
             for file in local_dir.glob("*"):
-                if file.name not in valid_names:
-                    file.unlink()
-                    logger.info(f"Removed stale file: {file.name}")
+                if file.is_file() and file.name not in valid_names:
+                    try:
+                        file.unlink()
+                        logger.info("Removed stale file: %s", file.name)
+                    except Exception as e:
+                        logger.warning("Failed to remove stale file %s: %s", file, e)
 
         except Exception as e:
             logger.error(f"Error removing stale files: {e}")
