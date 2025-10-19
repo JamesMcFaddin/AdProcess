@@ -57,8 +57,7 @@ configDefaults: dict[str, Any] = {
             "screen": 0,                      # Future: HDMI-0 vs HDMI-1, etc.
             "geometry": "1920x1080+0+0"       # Future: specify window size/placement
         }
-    },
-    "LogLevel": "INFO"
+    }
 }
 
 DefaultPlayList: dict[str, Any] = {
@@ -79,7 +78,7 @@ DefaultPlayList: dict[str, Any] = {
                 "video": "WeeklyAd.mp4",
                 "start": "10:30",
                 "end": "02:30",
-                "days": "Mon,Tue,Wed,Thu,Fri,Sat,Sun",
+                "days": "Mon,Tue,Wed,Thu,Fri,Sat",
                 "repeat": "No",
                 "start_date": "",
                 "end_date": ""

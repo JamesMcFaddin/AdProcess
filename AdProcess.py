@@ -21,7 +21,7 @@ if _tracer is not None:
     threading.settrace(_tracer)
 
 from AdLogging import *
-from AdLogging import SetupLogging
+from AdLogging import SetupLogging, CheckLogLevel
 
 from AdConfig import IsRaspberryPI, HOME_DIR
 from AdConfig import CONFIG, PLAY_LIST, LOCAL_VIDEOS
@@ -148,6 +148,9 @@ class AdProcessor:
         self.turn_display(True)
 
         while True:
+            # See if the logging level changed
+            CheckLogLevel()
+
             # 🔌 External quit trigger
             if (Path(HOME_DIR) / "quit").exists():
                 logger.info("Detected quit file. Exiting.")

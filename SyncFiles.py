@@ -1,233 +1,200 @@
-# AdProcess System
-# Copyright (c) 2025 James Eddy (James McFaddin)
-#
-# This software is licensed under the MIT License.
-# See the LICENSE file or https://opensource.org/licenses/MIT for details.
+# SyncFiles.py — JSON + MP4 sync (playlist-driven, one video per call)
+# AdProcess System | MIT License
 
+from __future__ import annotations
 from pathlib import Path
-import shutil, sys, contextlib
-from typing import Any, Mapping, MutableMapping, cast
-from collections import OrderedDict
+import json
+import shutil
+import contextlib
+import logging
+from typing import Dict, List, Any, cast
 
-_tracer = sys.gettrace()
-
-from AdConfig import AtomicWrite_json, LoadConfigOnly
-from AdConfig import CLOUD_VIDEOS, LOCAL_VIDEOS, Lastgood_path
-import AdConfig as cfg  # <- use module-qualified access everywhere
-
+import AdConfig as cfg  # CLOUD_CONFIGS, LOCAL_CONFIGS, CLOUD_VIDEOS, LOCAL_VIDEOS, PLAY_LIST
+from AdLogging import PLAY, PL, CFG, VID, START, DONE, WARN  # tag emojis
 from Player import PlayVideo, GetCurrentlyPlaying
 
-from AdLogging import *
-from AdLogging import ConfigChange
-
-import logging
 logger = logging.getLogger(__name__)
 
-#///////////////////////////////////////////////////////////////////////////////
-#
+# -----------------------------------------------------------------------------
+# Helpers
+
 def _mtime(p: Path) -> float:
     try:
         return p.stat().st_mtime
     except FileNotFoundError:
-        # common + harmless during sync races; just say "can't win"
         return -1.0
     except Exception as e:
         logger.warning("mtime(%s) failed: %s", p, e)
         return -1.0
 
-#/////////
-
-def _persist_last_good_and_apply(dst: Path, default: OrderedDict[str, Any]) -> bool:
-    """Write obj to dst atomically, then update AdConfig in-memory if dst is a last_good file."""
-    if not AtomicWrite_json(dst, default):
-        return False
-    try:
-        import AdConfig as cfg
-        fname = dst.name  # e.g., "config.json.lastgood" or "PlayList.json.lastgood"
-
-        if fname == "config.lastgood.json":
-            # in-place mutate so 'from AdConfig import CONFIG' stays live
-            cur = cast(MutableMapping[str, Any], cfg.CONFIG)
-            new = cast(Mapping[str, Any], default)
-            cur.clear()                  # pyright: ignore[reportUnknownMemberType]
-            cur.update(new)              # pyright: ignore[reportUnknownArgumentType,reportUnknownMemberType]
-
-        elif fname == "PlayList.lastgood.json":
-            cur = cast(MutableMapping[str, Any], cfg.PLAY_LIST)
-            new = cast(Mapping[str, Any], default)
-            cur.clear()                  # pyright: ignore[reportUnknownMemberType]
-            cur.update(new)              # pyright: ignore[reportUnknownArgumentType,reportUnknownMemberType]
-
-    except Exception as e:
-        logger.warning("Persisted %s but failed to update in-memory: %s", dst, e)
-    return True
-
-#/////////
-#
-# Syncs the .json files use for configuration. This function is called with the
-# .json filename and the associated defaults. There are four separaate config
-# files, at any particular time they may or may not be all the same.
-#
-#   1) The Cloud config file
-#   2) The Local config file
-#   3) The Last Good config file, which via sync becomes the most receent.
-#   4) The In Memory config. which via sync will mirror the Last Good file
-#
-def sync_common(basename: str, defaults: OrderedDict[str, Any]) -> bool:
-    try:
-        from AdConfig import LoadConfig  # ok to import here; it "always returns"
-
-        # Derive paths (module-qualified to avoid NameError)
-        cloud     = Path(cfg.CLOUD_CONFIGS) / basename
-        local     = Path(cfg.LOCAL_CONFIGS) / basename
-        last_good = Lastgood_path(Path(cfg.LOCAL_CONFIGS) / basename)
-
-        # Ensure parent exists before any writes
-        try:
-            last_good.parent.mkdir(parents=True, exist_ok=True)
-        except Exception as e:
-            logger.error("[%s] Cannot ensure last_good parent dir: %s", basename, e)
-            return False
-
-        # Seed last_good from in-memory defaults if missing (not a “change”)
-        if _mtime(last_good) < 0:
-            if _persist_last_good_and_apply(last_good, defaults):
-                logger.debug("[%s] Seeded last_good from defaults.", basename)
-            else:
-                logger.error("[%s] Failed to seed last_good; aborting sync.", basename)
-            return False
-
-        cloud_mtime     = _mtime(cloud)
-        last_good_mtime = _mtime(last_good)
-        local_mtime     = _mtime(local)
-
-        winner = None
-        if cloud_mtime > last_good_mtime and cloud_mtime > local_mtime:
-            winner = "cloud"
-        elif last_good_mtime > cloud_mtime and last_good_mtime > local_mtime:
-            winner = "last_good"
-        elif local_mtime > cloud_mtime and local_mtime > last_good_mtime:
-            winner = "local"
-        else:
-            logger.debug("[%s] No-op (no strict winner)", basename)
-            return False
-
-        if winner == "cloud":
-            tmp = local.parent / (basename + ".tmp")
-            try:
-                shutil.copy2(cloud, tmp)
-            except Exception as e:
-                logger.error("[%s] Cloud→temp copy failed: %s", basename, e)
-                with contextlib.suppress(Exception): tmp.unlink()
-                return False
-            try:
-                obj = LoadConfig(str(tmp), defaults)
-            finally:
-                with contextlib.suppress(Exception): tmp.unlink()
-
-            if _persist_last_good_and_apply(last_good, defaults):
-                logger.info("[%s] Applied from cloud → last_good", basename)
-                return True
-            return False
-
-        if winner == "last_good":
-            logger.debug("[%s] No-op (last_good newest)", basename)
-            return False
-
-        if winner == "local":
-            obj = LoadConfigOnly(str(local), defaults)
-            if _persist_last_good_and_apply(last_good, obj):
-                logger.info("[%s] Applied from local → last_good", basename)
-                return True
-            return False
-
-        return False
-
-    except Exception as e:
-        # catch-any: this function should NEVER crash the app
-        logger.error("sync_common(%s) crashed: %s", basename, e, exc_info=True)
-        return False
-
-#///////////////////////////////////////////////////////////////////////////////
-#
-def SyncConfigs() -> None:
-    logger.debug("    ********** Configs **********")
-
+def _copy_if_strictly_newer(src: Path, dst: Path, label: str) -> bool:
     """
-    Sync & apply runtime config and playlist.
-    Order matters: update CONFIG first (REMOTE_NAME may change), then PlayList.
-    Side-effects only; logging happens inside sync_common().
+    Copy src → dst (atomic via tmp+replace) iff src exists and src.mtime > dst.mtime.
+    Returns True if a copy occurred.
     """
+    if not src.exists():
+        logger.debug("%s source missing: %s", label, src)
+        return False
 
-    if sync_common("config.json", cast(OrderedDict[str, Any], cfg.CONFIG)):
-        ConfigChange()   # ← only when config actually applied
+    s_m = _mtime(src)
+    d_m = _mtime(dst)
 
-    # then sync playlist using the current REMOTE_NAME
-    sync_common("PlayList.json", cast(OrderedDict[str, Any], cfg.PLAY_LIST))
+    if d_m >= 0 and not (s_m > d_m):
+        logger.debug("%s no update (not newer): %s", label, dst.name)
+        return False
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_suffix(dst.suffix + ".tmp")
+    try:
+        shutil.copy2(src, tmp)
+        tmp.replace(dst)
+        logger.info("%s %s updated from cloud", label, dst.name)
+        return True
+    finally:
+        with contextlib.suppress(Exception):
+            if tmp.exists():
+                tmp.unlink()
+
+def _iter_playlist_videos(local_playlist_path: Path) -> List[str]:
+    """
+    Read the *local* PlayList.json and return MP4 basenames listed in Venue.entries[*].video.
+    Pylance-friendly typing & guards included.
+    """
+    try:
+        with local_playlist_path.open("r", encoding="utf-8") as f:
+            pl: Dict[str, Any] = json.load(f)
+    except Exception as e:
+        logger.warning("%s Unable to read playlist: %s", PL, e)
+        return []
+
+    try:
+        venue: Dict[str, Any] = cast(Dict[str, Any], pl.get("Venue", {}))
+        entries_obj: Dict[str, Dict[str, Any]] = cast(
+            Dict[str, Dict[str, Any]], venue.get("entries", {})
+        )
+        if not isinstance(entries_obj, dict):  # pyright: ignore[reportUnnecessaryIsInstance]
+            logger.warning("%s entries not a dict", PL)
+            return []
+
+        videos: List[str] = []
+        for entry in entries_obj.values():
+            # Safely extract and coerce the 'video' field
+            raw_video: Any = entry.get("video")
+            name: str = raw_video.strip() if isinstance(raw_video, str) else ""
+            if not name or not name.lower().endswith(".mp4"):
+                continue
+            videos.append(name)
+        return videos
+    except Exception as e:
+        logger.warning("%s Malformed playlist structure: %s", PL, e)
+        return []
+
+def _video_needs_sync(src: Path, dst: Path) -> bool:
+    """
+    Sync if size differs OR src is strictly newer than dst (+1s jitter cushion).
+    """
+    if not dst.exists():
+        return True
+    try:
+        sst = src.stat()
+        dstst = dst.stat()
+        if sst.st_size != dstst.st_size:
+            return True
+        if sst.st_mtime > dstst.st_mtime + 1:
+            return True
+        return False
+    except Exception:
+        return True
+
+# -----------------------------------------------------------------------------
+# Public API
+
+def SyncConfigs() -> Dict[str, bool]:
+    """
+    Sync JSON control files from Cloud → Local using a strict-newer policy.
+    Returns: {"config.json": bool, "PlayList.json": bool}
+    """
+    logger.debug("    ********** Configs (JSON-only) **********")
+
+    cloud_cfg_dir = Path(cfg.CLOUD_CONFIGS)
+    local_cfg_dir = Path(cfg.LOCAL_CONFIGS)
+
+    results: Dict[str, bool] = {}
+    for name in ("config.json", "PlayList.json"):
+        src = cloud_cfg_dir / name
+        dst = local_cfg_dir / name
+        label = PL if name.lower().startswith("play") else CFG
+        updated = _copy_if_strictly_newer(src, dst, label)
+        results[name] = bool(updated)
 
     logger.debug("      ********** Done **********")
+    return results
 
-#///////////////////////////////////////////////////////////////////////////////
-def SyncFiles() -> None:
-    logger.debug(f"{START} ********** Syncing starting **********")
+def SyncFiles() -> Dict[str, Any]:
+    """
+    Full sync per new design:
+      1) Sync config.json + PlayList.json (strict-newer).
+      2) Parse *local* PlayList.json and sync at most ONE MP4 per call
+         from CLOUD_VIDEOS → LOCAL_VIDEOS (temp + atomic replace).
+      3) If the updated video is currently playing, restart the player.
 
-    # 1) Sync configs/playlist (side effects + logging inside)
-    SyncConfigs()
+    Returns a report dict, e.g.:
+      {
+        "config.json": True/False,
+        "PlayList.json": True/False,
+        "video_synced": "WeeklyAd.mp4" or None
+      }
+    """
+    logger.debug(f"{START} ********** Sync start **********")
 
-    cloud_video_dir = Path(CLOUD_VIDEOS)
-    currently_being_played = GetCurrentlyPlaying()
+    report: Dict[str, Any] = SyncConfigs()
 
-    entries = list(cfg.PLAY_LIST["Venue"]["entries"].values())
+    # Step 2: sync one MP4 named in the LOCAL playlist (if any)
+    local_playlist = Path(cfg.LOCAL_CONFIGS) / "PlayList.json"
+    video_names = _iter_playlist_videos(local_playlist)
 
-    for entry in entries:
-        if not isinstance(entry, dict): # type: ignore defensive
-            continue
+    cloud_video_dir = Path(cfg.CLOUD_VIDEOS)
+    local_video_dir = Path(cfg.LOCAL_VIDEOS)
+    local_video_dir.mkdir(parents=True, exist_ok=True)
 
-        name = str(entry.get("video", "")).strip()
-        if not name:
-            continue
+    current = GetCurrentlyPlaying()
+    synced_name: str | None = None
 
-        # FILE (video) — stage on SD (.tmp → replace)
+    for name in video_names:
         src = cloud_video_dir / name
         if not src.exists():
-            logger.debug("Cloud video missing: %s", src)
+            logger.debug("%s cloud missing: %s", VID, src)
             continue
 
-        dst = Path(LOCAL_VIDEOS) / name
-        sd_tmp = None
+        dst = local_video_dir / name
+        if not _video_needs_sync(src, dst):
+            logger.debug("%s up-to-date: %s", VID, name)
+            continue
 
+        tmp = dst.with_suffix(".tmp")
         try:
-            # decide if update is required
-            do_sync = False
-            sst = src.stat()
-            if not dst.exists():
-                do_sync = True
-            else:
-                dstst = dst.stat()
-                if (sst.st_size != dstst.st_size) or (sst.st_mtime > dstst.st_mtime + 1):
-                    do_sync = True
+            shutil.copy2(src, tmp)
+            tmp.replace(dst)
+            logger.info("%s synced video: %s", VID, name)
+            synced_name = name
 
-            if not do_sync:
-                logger.debug("No update needed for: %s", name)
-                continue
+            # Restart if we updated the currently playing file
+            try:
+                if current and Path(current).resolve() == dst.resolve():
+                    logger.info("%s restarting player for updated video: %s", PLAY, name)
+                    PlayVideo(str(dst))
+            except Exception as e:
+                logger.warning("%s restart attempt failed: %s", WARN, e)
 
-            # copy cloud → SD temp, then atomic replace
-            sd_tmp = dst.with_suffix(".tmp")
-            shutil.copy2(src, sd_tmp)
-            sd_tmp.replace(dst)
-            logger.info("Synced video: %s", name)
-
-            if currently_being_played == str(dst):
-                logger.info("Restarting player for updated video: %s", name)
-                PlayVideo(str(dst))
-
-            return  # ✅ only one video per call
+            break  # only one video per call (design choice)
 
         except Exception as e:
-            logger.error("Failed to sync video '%s': %s", name, e)
-            if sd_tmp and sd_tmp.exists():
-                try:
-                    sd_tmp.unlink()
-                except Exception as e2:
-                    logger.error("Error cleaning up SD temp %s: %s", sd_tmp, e2)
-            continue  # scan next entry; will retry next pass
+            logger.error("%s failed to sync '%s': %s", VID, name, e)
+            with contextlib.suppress(Exception):
+                if tmp.exists():
+                    tmp.unlink()
+            # try next candidate; will retry on next pass
+
+    report["video_synced"] = synced_name
+    logger.debug(f"{DONE} ********** Sync complete **********")
+    return report

@@ -51,7 +51,6 @@ class OpenHours(TypedDict):
 class ConfigDefaults(TypedDict):
     OpenHours: OpenHours
     Players: PlayerConfig
-    LogLevel: str
 
 class VenuePlaylist(TypedDict):
     name: str
