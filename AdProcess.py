@@ -33,6 +33,14 @@ from PlayList import NormalizeTime, ProcessPlayList
 
 logger = logging.getLogger(__name__)
 
+from threading import Thread
+from WebAPI import StartWebApiServer   # we'll write this next
+
+def LaunchWebServer():
+    t = Thread(target=StartWebApiServer, daemon=True)
+    t.start()
+    return t
+
 #///////////////////////////////////////////////////////////////////////////////
 #
 class AdProcessor:
@@ -191,6 +199,10 @@ if __name__ == "__main__":
     LOG_FILE = f"{HOME_DIR}/AdProcess/AdProcess.log"
     SetupLogging(LOG_FILE)
 
-    # 2) Run the app
+    # 2) Start Web Service
+    web_thread = LaunchWebServer()
+    logger.debug("🌐 Web API thread started")
+
+    # 3) Run the app
     ad_processor = AdProcessor()
     ad_processor.run()

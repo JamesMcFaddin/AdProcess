@@ -1,81 +1,26 @@
 # AdLogging.py
 # AdProcess System
-# Copyright (c) 2025 James
-# MIT License: https://opensource.org/licenses/MIT
-
-"""
-AdLogging — Hardened logging for AdProcess
-==========================================
-
-Context:
-- Past symptom: after rotation, backups were full but current log was short.
-  Rotation itself succeeded; a separate exception likely occurred right after.
-  Duplicate handlers / multiple processes touching the same file can amplify it.
-
-What this module does:
-- Never let logging kill the app:
-  • logging.raiseExceptions = False
-  • File handler swallows its own internal errors (handleError override)
-- Safer file I/O:
-  • UTF-8 with errors="backslashreplace" (avoid UnicodeEncodeError landmines)
-  • delay=True so the file is opened lazily (smaller race window)
-  • Atomic-ish rotate (os.replace) with a tiny retry loop
-- Single writer path:
-  • QueueHandler → QueueListener so app code never touches the file directly
-- Dupe defense:
-  • On setup, remove/close any prior file/queue handlers targeting the same path
-- Visibility if the file is wedged:
-  • Adds a WARNING+ StreamHandler to stderr (shows up in journalctl under systemd)
-
-Operational notes:
-- Call SetupLogging() once at process start. If you re-init, it removes prior handlers
-  for the same file and stops the previous QueueListener.
-- Keep logs on local storage (~/AdProcess/logs). Rotating on CIFS/NFS is... sporty.
-- Under systemd:
-    Restart=always
-    RestartSec=5
-  (Optional: add WatchdogSec and ping it from your main loop.)
-
-Quick checks when something looks off:
-- Who has the log open?
-    lsof | grep -F 'AdProcess.log'
-- Do we have more than one runner?
-    pgrep -fa 'python.*AdProcess'
-- Is logrotate touching our file?
-    grep -R --line-number -F 'AdProcess.log' /etc/logrotate.conf /etc/logrotate.d || echo 'no rules'
-- See warnings/errors even if the file got stuck:
-    journalctl -u adprocess -e
-
-Minimal usage:
-    if __name__ == '__main__':
-        SetupLogging(f"{HOME_DIR}/AdProcess/AdProcess.log")
-        # (elsewhere in main, recommended)
-        # - install sys.excepthook that logs FATAL tracebacks
-        # - enable faulthandler to append to crash.dump
-        # - optionally write a heartbeat file per loop
-"""
+# Copyright (c) 2025
+# MIT License
 
 from __future__ import annotations
-from typing import Optional, cast
-
-import sys, queue, time, logging, os
+from typing import Optional, Any, cast
+import sys
+import time
+import queue
+import logging
 from pathlib import Path
 from logging.handlers import RotatingFileHandler, QueueHandler, QueueListener
-from logging.handlers import QueueListener as _QueueListener
 
 from AdConfig import HOME_DIR
-_ql: Optional[_QueueListener] = None  # module-level listener lifetime
 
-_current_log_level_str: Optional[str] = None
-
-# Base tags
+# -----------------------------------------------------------------------------
+# Emoji-ish tags
 START="🚦"; DONE="✅"; WARN="⚠️"; FAIL="❌"; SWAP="🔁"
 DIR="📁"; VID="🎬"; CFG="🧩"; PL="📜"; PLAY="▶"; STOP="⏹"; SKIP="⏭️"
-# Extras
 ROCKET="🚀"; SYNC="🔄"; CLOUD="☁️"; LOCAL="🏠"; RAM="🧠"; DISK="💾"; NET="🌐"
 MOUNT="📌"; UNMOUNT="🔌"; TIMER="⏱️"; CLOCK="🕒"; PUSH="⬆️"; PULL="⬇️"
 UPLOAD="📤"; DOWNLOAD="📥"; RETRY="🔂"; STAGE="🧪"; CONFLICT="🚧"; SNAPSHOT="📸"; SLIDE="🖼️"
-
 def TAG(*xs: str) -> str: return "".join(xs)
 
 __all__ = [
@@ -85,46 +30,73 @@ __all__ = [
     "MOUNT","UNMOUNT","TIMER","CLOCK","PUSH","PULL",
     "UPLOAD","DOWNLOAD","RETRY","STAGE","CONFLICT","SNAPSHOT","SLIDE",
     "TAG",
+    "get_logging_level","SetupLogging","CheckLogLevel",
 ]
 
-######################
-def get_logging_level() -> str:
-    """Level is toggled purely by the presence of ~/AdProcess/debug (INFO otherwise)."""
-    # (We deliberately do not consult config.json to avoid circular reads.)
-    if (Path(HOME_DIR) / "debug").exists():
-        return "DEBUG"
-    else:
-        return "INFO"
+# -----------------------------------------------------------------------------
+# Module-level listener handle + current level cache
+_ql: Optional[QueueListener] = None
+_current_log_level_str: Optional[str] = None
 
-######################
+# -----------------------------------------------------------------------------
+# Level toggle via presence of ~/AdProcess/debug (no config cycle)
+def get_logging_level() -> str:
+    try:
+        if not (HOME_DIR / "debug").exists():
+            return "INFO"
+    except Exception:
+        pass
+
+    return "DEBUG"
+
+# -----------------------------------------------------------------------------
+# Typed helpers to keep Pylance happy
+def _stderr(msg: str) -> None:
+    try:
+        sys.stderr.write(msg + "\n")
+    except Exception:
+        pass
+
+def _same_path(h: logging.Handler, target: Path) -> bool:
+    """Return True if handler 'h' writes to the same file path as 'target'."""
+    bf: Optional[str] = getattr(h, "baseFilename", None)  # present on file handlers
+    if isinstance(bf, str):
+        try:
+            return Path(bf).resolve() == target.resolve()
+        except Exception:
+            return False
+    return False
+
+def _is_stderr_stream_handler(h: logging.Handler) -> bool:
+    if isinstance(h, logging.StreamHandler):
+        sh = cast(logging.StreamHandler[Any], h)
+        return sh.stream is sys.stderr
+    return False
+
+# -----------------------------------------------------------------------------
 def SetupLogging(log_file: str = "App.log") -> None:
     """
-    Pi-friendly logging:
-      - Non-blocking app path via QueueHandler → QueueListener
-      - Drop-on-full queue (never blocks the main loop)
-      - Safe RotatingFileHandler (UTF-8, delay=True, atomic-ish rotate with retries)
-      - Adds WARNING+ breadcrumbs to stderr (journalctl visibility)
+    Pi-friendly, resilient logging:
+      - Non-blocking path via QueueHandler → QueueListener (drop-oldest on full)
+      - Safe RotatingFileHandler (UTF-8, delay=True, atomic-ish rotate)
+      - WARNING+ breadcrumbs to stderr
+      - No directory creation: if parent missing → console fallback
+      - Dupe defense: remove preexisting file/queue handlers for the same path
     """
     global _current_log_level_str, _ql
 
-    def _stderr(msg: str) -> None:
-        try:
-            sys.stderr.write(msg + "\n")
-        except Exception:
-            pass
-
     logging.raiseExceptions = False
 
-    # --- level from presence of debug file ---
+    # Determine initial level from debug file
     level_str = get_logging_level()
     _current_log_level_str = level_str
     level = getattr(logging, level_str, logging.INFO)
 
     log_path = Path(log_file)
-    try:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-    except Exception as e:
-        _stderr(f"[AdLogging] mkdir failed for {log_path.parent}: {e!r}; using console only")
+
+    # If the directory isn't there, use console only (do NOT mkdir)
+    if not log_path.parent.exists():
+        _stderr(f"[AdLogging] log dir missing: {log_path.parent}; using console only")
         logging.basicConfig(
             level=level,
             format="%(asctime)s %(levelname)-8s [%(name)s:%(lineno)d] %(message)s",
@@ -134,32 +106,25 @@ def SetupLogging(log_file: str = "App.log") -> None:
 
     fmt = "%(asctime)s %(levelname)-8s [%(name)s:%(lineno)d] %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
+
     root = logging.getLogger()
     root.setLevel(level)
 
-    # --- remove prior file/queue handlers for this path (dupe defense) ---
-    def _same_path(h, target: Path) -> bool:
-        bf = getattr(h, "baseFilename", None)
-        if not bf:
-            return False
-        try:
-            return Path(bf).resolve() == target.resolve()
-        except Exception:
-            # Fall back to direct string compare
-            return str(bf) == str(target)
-
+    # Remove prior file handlers for same path and prior queue handlers (dupe defense)
     for h in list(root.handlers):
         try:
-            if _same_path(h, log_path) or isinstance(h, QueueHandler):
+            if _same_path(h, log_path):
                 root.removeHandler(h)
                 try:
                     h.close()
                 except Exception:
                     pass
+            if isinstance(h, QueueHandler):
+                root.removeHandler(h)
         except Exception:
             pass
 
-    # --- Safe rotating file handler ---
+    # Safe rotating file handler
     class SafeRotating(RotatingFileHandler):
         def handleError(self, record: logging.LogRecord) -> None:
             try:
@@ -168,6 +133,7 @@ def SetupLogging(log_file: str = "App.log") -> None:
                 _stderr(f"[AdLogging] handler.handleError raised: {he!r}")
 
         def rotate(self, source: str, dest: str) -> None:
+            import os
             for _ in range(5):
                 try:
                     if os.path.exists(dest):
@@ -175,7 +141,7 @@ def SetupLogging(log_file: str = "App.log") -> None:
                             os.remove(dest)
                         except Exception as de:
                             _stderr(f"[AdLogging] remove {dest} failed: {de!r}")
-                    os.replace(source, dest)  # atomic on same filesystem
+                    os.replace(source, dest)  # atomic on Linux
                     return
                 except Exception:
                     time.sleep(0.05)
@@ -184,13 +150,14 @@ def SetupLogging(log_file: str = "App.log") -> None:
             except Exception as fe:
                 _stderr(f"[AdLogging] rotate fallback failed: {fe!r}")
 
+    # Create file handler (delay open)
     try:
         try:
             fh: RotatingFileHandler = SafeRotating(
                 log_file, maxBytes=1_000_000, backupCount=3,
                 encoding="utf-8", delay=True, errors="backslashreplace",
             )
-        except TypeError:  # older Python lacks 'errors='
+        except TypeError:  # older Python: no 'errors=' kw
             fh = SafeRotating(
                 log_file, maxBytes=1_000_000, backupCount=3,
                 encoding="utf-8", delay=True,
@@ -201,10 +168,8 @@ def SetupLogging(log_file: str = "App.log") -> None:
         return
 
     fh.setFormatter(logging.Formatter(fmt, datefmt))
-    # Let QueueHandler control filtering; leave fh at NOTSET
-    # fh.setLevel(logging.NOTSET)
 
-    # --- Non-blocking: QueueHandler → QueueListener (drop-oldest) ---
+    # Non-blocking queue handler with drop-oldest policy
     class DropQueueHandler(QueueHandler):
         def enqueue(self, record: logging.LogRecord) -> None:
             q = cast("queue.Queue[logging.LogRecord]", self.queue)
@@ -224,7 +189,7 @@ def SetupLogging(log_file: str = "App.log") -> None:
     qh = DropQueueHandler(q)
     qh.setLevel(level)
 
-    # stop previous listener if re-initializing
+    # Stop previous listener if any (re-init safe)
     if _ql is not None:
         try:
             _ql.stop()
@@ -233,40 +198,31 @@ def SetupLogging(log_file: str = "App.log") -> None:
 
     ql = QueueListener(q, fh, respect_handler_level=True)
     ql.start()
-    _ql = ql  # keep it alive
+    _ql = ql
 
-    # install handlers: queue to file, plus WARNING+ to stderr for breadcrumbs
+    # Install the queue handler as the sole root handler (we may add stderr below)
     root.addHandler(qh)
 
-    # Add a minimal stderr handler for WARNING+ (journalctl visibility), but avoid duplicates
-    have_stderr = any(isinstance(h, logging.StreamHandler) and getattr(h, "stream", None) is sys.stderr for h in root.handlers)
+    # Add a minimal stderr handler for WARNING+ (journalctl visibility), avoid duplicates
+    have_stderr = any(_is_stderr_stream_handler(h) for h in root.handlers)
     if not have_stderr:
-        sh = logging.StreamHandler(sys.stderr)
+        sh = logging.StreamHandler(stream=sys.stderr)
         sh.setLevel(logging.WARNING)
         sh.setFormatter(logging.Formatter(fmt, datefmt))
         root.addHandler(sh)
 
-    # spacer if the file already open
-    try:
-        if getattr(fh, "stream", None):
-            fh.stream.write("\n"); fh.stream.flush()
-    except Exception:
-        pass
-
     root.info("===== Application startup =====")
-    root.debug("Initial logging level set to %s (via debug file presence)", level_str)
+    root.debug("Initial logging level set to %s (via debug file)", level_str)
 
-######################
+# -----------------------------------------------------------------------------
 def CheckLogLevel() -> bool:
     """
-    Re-reads desired level from the debug file; applies to root & handlers if changed.
-    Never raises. Returns True if a level change was applied.
+    Re-checks the debug-file toggle and updates the root/handlers if changed.
+    Never raises. Returns True iff a level change was applied.
     """
     global _current_log_level_str
-
     try:
         desired = get_logging_level()
-
         if desired == _current_log_level_str:
             return False
 
@@ -277,10 +233,10 @@ def CheckLogLevel() -> bool:
             try:
                 h.setLevel(new_level)
             except Exception as he:
-                # Best-effort; don't fail the app for logging issues
+                # Keep quiet; it's best-effort
                 root.debug("CheckLogLevel: couldn't adjust handler %r: %s", h, he)
 
-        root.info("Log level changed from %s to %s (via debug file toggle)", _current_log_level_str, desired)
+        logging.info("Log level changed from %s to %s", _current_log_level_str, desired)
         _current_log_level_str = desired
         return True
 
