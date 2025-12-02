@@ -5,32 +5,10 @@ import json, shutil, contextlib, logging
 from typing import Dict, List, Any, cast
 
 import AdConfig as cfg
-from AdLogging import PLAY, PL, CFG, VID, START, DONE, WARN
+from AdLogging import PLAY, PL, VID, START, DONE, WARN
 from Player import PlayVideo, GetCurrentlyPlaying
 
 logger = logging.getLogger(__name__)
-
-def _mtime(p: Path) -> float:
-    try: return p.stat().st_mtime
-    except FileNotFoundError: return -1.0
-    except Exception as e:
-        logger.warning("mtime(%s) failed: %s", p, e); return -1.0
-
-def _copy_if_strictly_newer(src: Path, dst: Path, label: str) -> bool:
-    if not src.exists():
-        logger.debug("%s source missing: %s", label, src); return False
-    if not dst.parent.exists():
-        logger.debug("%s dest dir missing: %s (skip)", label, dst.parent); return False
-    s_m, d_m = _mtime(src), _mtime(dst)
-    if d_m >= 0 and not (s_m > d_m):
-        logger.debug("%s no update (not newer): %s", label, dst.name); return False
-    tmp = dst.with_suffix(dst.suffix + ".tmp")
-    try:
-        shutil.copy2(src, tmp); tmp.replace(dst)
-        logger.info("%s %s updated from cloud", label, dst.name); return True
-    finally:
-        with contextlib.suppress(Exception):
-            if tmp.exists(): tmp.unlink()
 
 def _iter_playlist_videos(local_playlist_path: Path) -> List[str]:
     try:
@@ -58,22 +36,8 @@ def _video_needs_sync(src: Path, dst: Path) -> bool:
     except Exception:
         return True
 
-def SyncConfigs() -> Dict[str, bool]:
-    logger.debug("    ********** Configs (JSON-only) **********")
-    cloud_cfg_dir, local_cfg_dir = Path(cfg.CLOUD_CONFIGS), Path(cfg.LOCAL_CONFIGS)
-    if not cloud_cfg_dir.exists(): logger.debug("%s cloud configs dir missing: %s", CFG, cloud_cfg_dir)
-    if not local_cfg_dir.exists(): logger.debug("%s local configs dir missing: %s", CFG, local_cfg_dir)
-    results: Dict[str, bool] = {}
-    for name in ("config.json", "PlayList.json"):
-        src, dst = cloud_cfg_dir / name, local_cfg_dir / name
-        label = PL if name.lower().startswith("play") else CFG
-        results[name] = _copy_if_strictly_newer(src, dst, label)
-    logger.debug("      ********** Done **********")
-    return results
-
-def SyncFiles() -> Dict[str, Any]:
+def SyncFiles() -> str:
     logger.debug(f"{START} ********** Sync start **********")
-    report: Dict[str, Any] = SyncConfigs()
 
     local_playlist = Path(cfg.LOCAL_CONFIGS) / "PlayList.json"
     video_names = _iter_playlist_videos(local_playlist)
@@ -83,7 +47,7 @@ def SyncFiles() -> Dict[str, Any]:
     if not local_video_dir.exists(): logger.debug("%s local video dir missing: %s", VID, local_video_dir)
 
     current = GetCurrentlyPlaying()
-    synced_name: str | None = None
+    synced_name: str = ""
 
     for name in video_names:
         src, dst = cloud_video_dir / name, local_video_dir / name
@@ -111,6 +75,5 @@ def SyncFiles() -> Dict[str, Any]:
             with contextlib.suppress(Exception):
                 if tmp.exists(): tmp.unlink()
 
-    report["video_synced"] = synced_name
     logger.debug(f"{DONE} ********** Sync complete **********")
-    return report
+    return synced_name

@@ -29,7 +29,7 @@ from AdConfigTypes import DayHours
 
 from SyncFiles import SyncFiles
 from Player import StopPlayer
-from PlayList import NormalizeTime, ProcessPlayList
+from PlayList import NormalizeTime, ProcessPlayList, NormalizeDay
 
 logger = logging.getLogger(__name__)
 
@@ -44,34 +44,14 @@ def LaunchWebServer():
 #///////////////////////////////////////////////////////////////////////////////
 #
 class AdProcessor:
-    open_minutes: int
-    close_minutes: int
+    open_minutes: int = 0
+    close_minutes: int = 0
+    day: str = ""
 
     CHECK_INTERVAL = 30
 
     def __init__(self):
-        self._last_playlist_mtime = 0
-        self._last_config_mtime = 0
-        self.log_count = 0
-    
-        timeNow = datetime.datetime.now()
-
-        try:
-            day = timeNow.strftime("%a")
-            open_hours = CONFIG["OpenHours"]
-            hours = cast(DayHours, open_hours[day])
-
-            open_time  = hours["open"]
-            close_time = hours["close"]
-
-        except Exception as e:
-            print(f"no open times: {e}")
-            open_time = '11:00'
-            close_time = '2:00'
-            logger.warning(f"today we open at {open_time} and close at {close_time}")
-
-        self.open_minutes = NormalizeTime(open_time)
-        self.close_minutes = NormalizeTime(close_time)
+        self.refresh_open_close_minutes()
 
     def reboot_system(self):
         if IsRaspberryPI():
@@ -83,11 +63,9 @@ class AdProcessor:
 
     def compute_wake_time(self, offset_minutes: int = -30) -> int:
         """
-        Compute the wake-up time (in minutes past midnight), offset from open time.
+        Compute the wake-up time (in minutes from now), offset from open time.
         """
         wake_time = self.open_minutes + offset_minutes
-        if wake_time < 0:
-            wake_time += 1440  # wrap around to previous day if needed
         return wake_time
 
     def current_minutes(self) -> int:
@@ -97,11 +75,25 @@ class AdProcessor:
         now = datetime.datetime.now()
         return now.hour * 60 + now.minute
     
-    def _refresh_open_close(self):
-        day = datetime.datetime.now().strftime("%a")
-        hours = cast(DayHours, CONFIG["OpenHours"][day])
-        self.open_minutes  = NormalizeTime(hours["open"])
-        self.close_minutes = NormalizeTime(hours["close"])
+    def refresh_open_close_minutes(self):
+        d = NormalizeDay(datetime.datetime.now(), 2)
+        if d == self.day:
+            return
+
+        try:
+            self.day = d
+            hours = cast(DayHours, CONFIG["OpenHours"][self.day])
+            open_time  = hours["open"]
+            close_time = hours["close"]
+
+        except Exception as e:
+            logger.warning("Invalid OpenHours %s", e)
+            open_time = '11:00'
+            close_time = '2:00'
+
+        logger.warning(f"Today ({self.day}) we open at {open_time} and close at {close_time}")
+        self.open_minutes = NormalizeTime(open_time)
+        self.close_minutes = NormalizeTime(close_time)
 
     #///////////////////////////////////////////////////////////////////////////////
     #
@@ -173,7 +165,8 @@ class AdProcessor:
                 StopPlayer()
                 self.turn_display(False)
 
-                wake_time = self.compute_wake_time(offset_minutes=-30)
+                self.refresh_open_close_minutes()
+                wake_time = self.compute_wake_time()
 
             if wake_time != 0:
                 if self.current_minutes() >= wake_time:

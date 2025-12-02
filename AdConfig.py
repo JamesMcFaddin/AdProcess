@@ -7,7 +7,7 @@
 from __future__ import annotations
 import json, platform, socket, logging
 from pathlib import Path
-from typing import Any, Mapping, Tuple, Literal, cast, Final
+from typing import Any, Mapping, Tuple, Literal, cast
 from AdConfigTypes import ConfigDefaults, PlayListDoc
 
 logger = logging.getLogger(__name__)
@@ -139,12 +139,7 @@ def LoadConfigOnly(path: str, defaults: Mapping[str, Any]) -> dict[str, Any]:
 # And use its parent as HOME_DIR
 SCRIPT_DIR = Path(__file__).resolve().parent
 HOME_DIR = SCRIPT_DIR.parent
-
-CLOUD_DIR: Final[Path] = (
-    (HOME_DIR / "OneDrive" / "AdProcess").resolve()
-    if (HOME_DIR / "onedrive").is_file()   # <- flag file toggles OneDrive mode
-    else (HOME_DIR.parent / "Cloud").resolve()
-)
+CLOUD_DIR = (HOME_DIR / "Cloud")
 
 REMOTE_NAME = socket.gethostname()
 

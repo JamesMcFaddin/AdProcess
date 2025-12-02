@@ -11,6 +11,15 @@ from Player import PlayVideo, GetCurrentlyPlaying
 
 logger = logging.getLogger(__name__)
 
+def NormalizeDay(now: datetime.datetime, threshold: int = 6) -> str:
+    """
+    Returns the OpenHours key ("Mon", "Tue", ...) for the *business day*.
+    If time is before rollover_hour, count it as previous day.
+    """
+    if now.hour < threshold:
+        now = now - datetime.timedelta(days=1)
+    return now.strftime("%a")  # "Mon", "Tue", etc.
+
 def NormalizeTime(strTime: str, adjust: bool = True, threshold: int = 6) -> int:
     if not strTime:
         return -1
