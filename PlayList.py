@@ -1,4 +1,8 @@
-# PlayList.py — MP4-only selection with safe fallbacks
+# PlayList.py - AdProcess System
+# Copyright (c) 2025 James Eddy (James McFaddin)
+#
+# This software is licensed under the MIT License.
+# See the LICENSE file or https://opensource.org/licenses/MIT for details.
 
 import datetime
 import logging

@@ -1,4 +1,9 @@
-# SyncFiles.py — JSON + MP4 sync (no directory creation)
+# SyncFiles.py - AdProcess System 
+# Copyright (c) 2025 James Eddy (James McFaddin)
+#
+# This software is licensed under the MIT License.
+# See the LICENSE file or https://opensource.org/licenses/MIT for details.
+
 from __future__ import annotations
 from pathlib import Path
 import json, shutil, contextlib, logging
@@ -10,24 +15,30 @@ from Player import PlayVideo, GetCurrentlyPlaying
 
 logger = logging.getLogger(__name__)
 
+###############
 def _iter_playlist_videos(local_playlist_path: Path) -> List[str]:
     try:
         with local_playlist_path.open("r", encoding="utf-8") as f:
             pl: Dict[str, Any] = json.load(f)
+
     except Exception as e:
         logger.warning("%s Unable to read playlist: %s", PL, e); return []
+    
     try:
         venue: Dict[str, Any] = cast(Dict[str, Any], pl.get("Venue", {}))
         entries_obj: Dict[str, Dict[str, Any]] = cast(Dict[str, Dict[str, Any]], venue.get("entries", {}))
         vids: List[str] = []
+
         for entry in entries_obj.values():
             raw: Any = entry.get("video")
             name: str = raw.strip() if isinstance(raw, str) else ""
             if name.lower().endswith(".mp4"): vids.append(name)
         return vids
+    
     except Exception as e:
         logger.warning("%s Malformed playlist structure: %s", PL, e); return []
 
+###############
 def _video_needs_sync(src: Path, dst: Path) -> bool:
     if not dst.exists(): return True
     try:
@@ -36,6 +47,7 @@ def _video_needs_sync(src: Path, dst: Path) -> bool:
     except Exception:
         return True
 
+###############
 def SyncFiles() -> str:
     logger.debug(f"{START} ********** Sync start **********")
 
@@ -63,13 +75,16 @@ def SyncFiles() -> str:
             shutil.copy2(src, tmp); tmp.replace(dst)
             logger.info("%s synced video: %s", VID, name)
             synced_name = name
+
             try:
                 if current and Path(current).resolve() == dst.resolve():
                     logger.info("%s restarting player for updated video: %s", PLAY, name)
                     PlayVideo(str(dst))
+
             except Exception as e:
                 logger.warning("%s restart attempt failed: %s", WARN, e)
             break
+
         except Exception as e:
             logger.error("%s failed to sync '%s': %s", VID, name, e)
             with contextlib.suppress(Exception):

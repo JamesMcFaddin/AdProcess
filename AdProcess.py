@@ -1,11 +1,10 @@
-# AdProcess System
+# AdProcess.py - AdProcess System
 # Copyright (c) 2025 James Eddy (James McFaddin)
 #
 # This software is licensed under the MIT License.
 # See the LICENSE file or https://opensource.org/licenses/MIT for details.
 
 from __future__ import annotations
-import logging
 
 import os
 import subprocess
@@ -20,10 +19,7 @@ _tracer = sys.gettrace()
 if _tracer is not None:
     threading.settrace(_tracer)
 
-from AdLogging import *
-from AdLogging import SetupLogging, CheckLogLevel
-
-from AdConfig import IsRaspberryPI, HOME_DIR
+from AdConfig import IsRaspberryPI, HOME_DIR, SCRIPT_DIR
 from AdConfig import CONFIG, PLAY_LIST, LOCAL_VIDEOS
 from AdConfigTypes import DayHours
 
@@ -31,6 +27,8 @@ from SyncFiles import SyncFiles
 from Player import StopPlayer
 from PlayList import NormalizeTime, ProcessPlayList, NormalizeDay
 
+import logging
+from AdLogging import *
 logger = logging.getLogger(__name__)
 
 from threading import Thread
@@ -122,6 +120,16 @@ class AdProcessor:
         except Exception as e:
             logger.error(f"Error removing stale files: {e}")
 
+    #///////////////////////////////////////////////////////////////////////////////
+    #
+    def quit_process(self) -> bool:
+        if (Path(HOME_DIR) / "quit").exists():
+            logger.info("Detected quit file. Exiting.")
+            os.remove((Path(HOME_DIR) / "quit"))
+            return True
+
+        return False
+
     #///////////////////////////////////////////////////////////////////////////
     # Turn HDMI display on or off, if not debugging, on Raspberry Pi.
     def turn_display(self, on: bool):
@@ -151,12 +159,10 @@ class AdProcessor:
             # See if the logging level changed
             CheckLogLevel()
 
-            # 🔌 External quit trigger
-            if (Path(HOME_DIR) / "quit").exists():
-                logger.info("Detected quit file. Exiting.")
+            # External quit triggered
+            if self.quit_process():
                 StopPlayer()
                 self.turn_display(True)
-                os.remove((Path(HOME_DIR) / "quit"))
                 sys.exit(0)
 
             # 💤 Are we closed right now?
@@ -189,7 +195,7 @@ class AdProcessor:
 #
 if __name__ == "__main__":
     # 1) Start logging
-    LOG_FILE = f"{HOME_DIR}/AdProcess/AdProcess.log"
+    LOG_FILE = f"{SCRIPT_DIR}/AdProcess.log"
     SetupLogging(LOG_FILE)
 
     # 2) Start Web Service

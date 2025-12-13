@@ -1,9 +1,12 @@
-# AdLogging.py
-# AdProcess System
-# Copyright (c) 2025
-# MIT License
+# AdLogging.py - AdProcess System
+# Copyright (c) 2025 James Eddy (James McFaddin)
+#
+# This software is licensed under the MIT License.
+# See the LICENSE file or https://opensource.org/licenses/MIT for details.
+# AdLogging.py logging setup + runtime level toggle + exported paths for WebAPI
 
 from __future__ import annotations
+
 from typing import Optional, Any, cast
 import sys
 import time
@@ -31,7 +34,12 @@ __all__ = [
     "UPLOAD","DOWNLOAD","RETRY","STAGE","CONFLICT","SNAPSHOT","SLIDE",
     "TAG",
     "get_logging_level","SetupLogging","CheckLogLevel",
+    "GetDebugFlagPath","GetActiveLogPath","GetActiveErrorLogPath",
 ]
+
+# -----------------------------------------------------------------------------
+# Debug-flag lives in HOME (NOT in AdProcess dir): ~/debug
+_DEBUG_FLAG: Path = (HOME_DIR / "debug")
 
 # -----------------------------------------------------------------------------
 # Module-level listener handle + current level cache
@@ -39,15 +47,35 @@ _ql: Optional[QueueListener] = None
 _current_log_level_str: Optional[str] = None
 
 # -----------------------------------------------------------------------------
-# Level toggle via presence of ~/AdProcess/debug (no config cycle)
+# Exported "active" paths for WebAPI (set by SetupLogging)
+_active_log_path: Optional[Path] = None
+_active_err_log_path: Optional[Path] = None
+
+
+# -----------------------------------------------------------------------------
+# Public path getters (WebAPI-friendly)
+
+def GetDebugFlagPath() -> Path:
+    return Path(_DEBUG_FLAG)
+
+def GetActiveLogPath() -> str:
+    # Empty string means "unknown/not set"
+    return str(_active_log_path) if _active_log_path is not None else ""
+
+def GetActiveErrorLogPath() -> str:
+    return str(_active_err_log_path) if _active_err_log_path is not None else ""
+
+
+# -----------------------------------------------------------------------------
+# Level toggle via presence of ~/debug (no config cycle)
 def get_logging_level() -> str:
     try:
-        if not (HOME_DIR / "debug").exists():
+        if not _DEBUG_FLAG.exists():
             return "INFO"
     except Exception:
         pass
-
     return "DEBUG"
+
 
 # -----------------------------------------------------------------------------
 # Typed helpers to keep Pylance happy
@@ -73,6 +101,21 @@ def _is_stderr_stream_handler(h: logging.Handler) -> bool:
         return sh.stream is sys.stderr
     return False
 
+
+# -----------------------------------------------------------------------------
+class _MinLevelFilter(logging.Filter):
+    """Allow only records >= min_level."""
+    def __init__(self, min_level: int):
+        super().__init__()
+        self._min_level = int(min_level)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            return int(record.levelno) >= self._min_level
+        except Exception:
+            return True
+
+
 # -----------------------------------------------------------------------------
 def SetupLogging(log_file: str = "App.log") -> None:
     """
@@ -80,10 +123,10 @@ def SetupLogging(log_file: str = "App.log") -> None:
       - Non-blocking path via QueueHandler → QueueListener (drop-oldest on full)
       - Safe RotatingFileHandler (UTF-8, delay=True, atomic-ish rotate)
       - WARNING+ breadcrumbs to stderr
-      - No directory creation: if parent missing → console fallback
+      - Optional separate ERROR log (WARNING+ to *.err next to log file)
       - Dupe defense: remove preexisting file/queue handlers for the same path
     """
-    global _current_log_level_str, _ql
+    global _current_log_level_str, _ql, _active_log_path, _active_err_log_path
 
     logging.raiseExceptions = False
 
@@ -93,6 +136,10 @@ def SetupLogging(log_file: str = "App.log") -> None:
     level = getattr(logging, level_str, logging.INFO)
 
     log_path = Path(log_file)
+
+    # Record active paths early (even if we fall back to console)
+    _active_log_path = log_path
+    _active_err_log_path = log_path.with_suffix(".err")
 
     # If the directory isn't there, use console only (do NOT mkdir)
     if not log_path.parent.exists():
@@ -110,10 +157,10 @@ def SetupLogging(log_file: str = "App.log") -> None:
     root = logging.getLogger()
     root.setLevel(level)
 
-    # Remove prior file handlers for same path and prior queue handlers (dupe defense)
+    # Remove prior file handlers for same paths and prior queue handlers (dupe defense)
     for h in list(root.handlers):
         try:
-            if _same_path(h, log_path):
+            if _same_path(h, log_path) or _same_path(h, _active_err_log_path):
                 root.removeHandler(h)
                 try:
                     h.close()
@@ -150,24 +197,45 @@ def SetupLogging(log_file: str = "App.log") -> None:
             except Exception as fe:
                 _stderr(f"[AdLogging] rotate fallback failed: {fe!r}")
 
-    # Create file handler (delay open)
+    # Create main log file handler (delay open)
     try:
         try:
             fh: RotatingFileHandler = SafeRotating(
-                log_file, maxBytes=1_000_000, backupCount=3,
+                str(log_path), maxBytes=1_000_000, backupCount=3,
                 encoding="utf-8", delay=True, errors="backslashreplace",
             )
         except TypeError:  # older Python: no 'errors=' kw
             fh = SafeRotating(
-                log_file, maxBytes=1_000_000, backupCount=3,
+                str(log_path), maxBytes=1_000_000, backupCount=3,
                 encoding="utf-8", delay=True,
             )
     except Exception as e:
-        _stderr(f"[AdLogging] creating file handler failed for {log_file}: {e!r}; using console only")
+        _stderr(f"[AdLogging] creating file handler failed for {log_path}: {e!r}; using console only")
         logging.basicConfig(level=level, format=fmt, datefmt=datefmt)
         return
 
     fh.setFormatter(logging.Formatter(fmt, datefmt))
+    fh.setLevel(level)
+
+    # Create error log handler (WARNING+), separate file next to main log
+    errh: Optional[RotatingFileHandler] = None
+    try:
+        try:
+            errh = SafeRotating(
+                str(_active_err_log_path), maxBytes=500_000, backupCount=2,
+                encoding="utf-8", delay=True, errors="backslashreplace",
+            )
+        except TypeError:
+            errh = SafeRotating(
+                str(_active_err_log_path), maxBytes=500_000, backupCount=2,
+                encoding="utf-8", delay=True,
+            )
+        errh.setFormatter(logging.Formatter(fmt, datefmt))
+        errh.setLevel(logging.WARNING)
+        errh.addFilter(_MinLevelFilter(logging.WARNING))
+    except Exception as e:
+        _stderr(f"[AdLogging] creating error handler failed for {_active_err_log_path}: {e!r}")
+        errh = None
 
     # Non-blocking queue handler with drop-oldest policy
     class DropQueueHandler(QueueHandler):
@@ -196,11 +264,16 @@ def SetupLogging(log_file: str = "App.log") -> None:
         except Exception:
             pass
 
-    ql = QueueListener(q, fh, respect_handler_level=True)
+    # Queue listener fans out to: main log, and optionally error log
+    if errh is not None:
+        ql = QueueListener(q, fh, errh, respect_handler_level=True)
+    else:
+        ql = QueueListener(q, fh, respect_handler_level=True)
+
     ql.start()
     _ql = ql
 
-    # Install the queue handler as the sole root handler (we may add stderr below)
+    # Install the queue handler as the root handler (plus stderr for breadcrumbs)
     root.addHandler(qh)
 
     # Add a minimal stderr handler for WARNING+ (journalctl visibility), avoid duplicates
@@ -212,7 +285,8 @@ def SetupLogging(log_file: str = "App.log") -> None:
         root.addHandler(sh)
 
     root.info("===== Application startup =====")
-    root.debug("Initial logging level set to %s (via debug file)", level_str)
+    root.debug(f"Initial logging level set to {level_str} (via debug flag {str(_DEBUG_FLAG)!r})")
+
 
 # -----------------------------------------------------------------------------
 def CheckLogLevel() -> bool:
@@ -231,18 +305,21 @@ def CheckLogLevel() -> bool:
         root.setLevel(new_level)
         for h in list(root.handlers):
             try:
-                h.setLevel(new_level)
+                # Keep stderr handler at WARNING so you don't get spam there
+                if _is_stderr_stream_handler(h):
+                    h.setLevel(logging.WARNING)
+                else:
+                    h.setLevel(new_level)
             except Exception as he:
-                # Keep quiet; it's best-effort
-                root.debug("CheckLogLevel: couldn't adjust handler %r: %s", h, he)
+                root.debug(f"CheckLogLevel: couldn't adjust handler {h!r}: {he!r}")
 
-        logging.info("Log level changed from %s to %s", _current_log_level_str, desired)
+        logging.info(f"Log level changed from {_current_log_level_str} to {desired}")
         _current_log_level_str = desired
         return True
 
     except Exception as e:
         try:
-            logging.warning("CheckLogLevel failed: %s", e)
+            logging.warning(f"CheckLogLevel failed: {e!r}")
         except Exception:
             pass
         return False

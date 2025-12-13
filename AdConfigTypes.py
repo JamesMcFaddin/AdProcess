@@ -1,4 +1,4 @@
-# AdProcess System
+# AdConfigTypes.py - AdProcess System
 # Copyright (c) 2025 James Eddy (James McFaddin)
 #
 # This software is licensed under the MIT License.

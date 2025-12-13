@@ -143,7 +143,7 @@ CLOUD_DIR = (HOME_DIR / "Cloud")
 
 REMOTE_NAME = socket.gethostname()
 
-LOCAL_CONFIGS = str((HOME_DIR / "AdProcess" / "config").resolve())
+LOCAL_CONFIGS = str((SCRIPT_DIR / "config").resolve())
 LOCAL_VIDEOS  = str((HOME_DIR / "Videos").resolve())
 CLOUD_CONFIGS = str((CLOUD_DIR / "Configs" / REMOTE_NAME).resolve())
 CLOUD_VIDEOS  = str((CLOUD_DIR / "AdVideos").resolve())

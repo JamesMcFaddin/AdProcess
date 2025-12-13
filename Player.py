@@ -1,7 +1,9 @@
-# Player.py — MP4-only (VLC/cvlc) with prebuilt fast-swap launch
-# AdProcess System
-# Copyright (c) 2025 James
-# MIT License
+# Player.py - AdProcess System
+# MP4-only (VLC/cvlc) with prebuilt fast-swap launch
+#
+# Copyright (c) 2025 James Eddy (James McFaddin)
+# This software is licensed under the MIT License.
+# See the LICENSE file or https://opensource.org/licenses/MIT for details.
 
 from __future__ import annotations
 from typing import Optional, List, Dict
