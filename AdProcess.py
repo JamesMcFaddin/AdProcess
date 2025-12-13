@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import os
 import subprocess
-import time
 import datetime
 
 from pathlib import Path
-from typing import cast
+from typing import Optional, cast
+from types import FrameType
 
-import sys, threading
+import sys, threading, signal
 _tracer = sys.gettrace()
 if _tracer is not None:
     threading.settrace(_tracer)
@@ -72,7 +72,7 @@ class AdProcessor:
         """
         now = datetime.datetime.now()
         return now.hour * 60 + now.minute
-    
+
     def refresh_open_close_minutes(self):
         d = NormalizeDay(datetime.datetime.now(), 2)
         if d == self.day:
@@ -139,7 +139,7 @@ class AdProcessor:
             return
 
         output_name = "HDMI-A-1"
-        
+
         if on:
             cmd: list[str] = ["wlr-randr", "--output", output_name, "--on"]
         else:
@@ -147,15 +147,26 @@ class AdProcessor:
 
         subprocess.run(cmd, check=True)
 
-   #////////////////////////////////////////////////////////////////////////////
-   #
+    #////////////////////////////////////////////////////////////////////////////
+    #
     def run(self):
-        # Let us just sleep for 10 seconds
-        time.sleep(10)
+        _shutdown = threading.Event()
+
+        def _on_signal(_signum: int, _frame: Optional[FrameType]) -> None:
+            # Explicitly mark as intentionally unused (silences strict linters)
+            del _signum, _frame
+            _shutdown.set()
+
+        signal.signal(signal.SIGTERM, _on_signal)
+        signal.signal(signal.SIGINT, _on_signal)
+
+        # Replace sleep(10) with interruptible wait
+        _shutdown.wait(timeout=10.0)
+
         wake_time = 0
         self.turn_display(True)
 
-        while True:
+        while not _shutdown.is_set():
             # See if the logging level changed
             CheckLogLevel()
 
@@ -163,6 +174,7 @@ class AdProcessor:
             if self.quit_process():
                 StopPlayer()
                 self.turn_display(True)
+                ShutdownAndArchive()   # archive + stop logging
                 sys.exit(0)
 
             # 💤 Are we closed right now?
@@ -180,8 +192,8 @@ class AdProcessor:
 
                     self.remove_stale_files()
                     SyncFiles()
+                    ShutdownAndArchive()
                     self.reboot_system()
-
             else:
                 ProcessPlayList()
                 logger.debug(f"{DONE} ********** Processing PlayList done")
@@ -189,7 +201,15 @@ class AdProcessor:
             SyncFiles()
             logger.debug(f"{DONE} ****** Syncing files done")
 
-            time.sleep(self.CHECK_INTERVAL)
+            FlushLogs()
+            _shutdown.wait(timeout=float(self.CHECK_INTERVAL))
+
+        # Graceful shutdown when SIGTERM/SIGINT is received
+        StopPlayer()
+        self.turn_display(True)
+        logger.debug(f"{DONE} Shutting dowm")
+        ShutdownAndArchive()
+        sys.exit(0)
 
 #///////////////////////////////////////////////////////////////////////////////
 #

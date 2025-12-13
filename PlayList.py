@@ -5,14 +5,14 @@
 # See the LICENSE file or https://opensource.org/licenses/MIT for details.
 
 import datetime
-import logging
 import os
 from pathlib import Path
 
-from AdLogging import *
 from AdConfig import PLAY_LIST, LOCAL_VIDEOS
 from Player import PlayVideo, GetCurrentlyPlaying
 
+import logging
+from AdLogging import *
 logger = logging.getLogger(__name__)
 
 def NormalizeDay(now: datetime.datetime, threshold: int = 6) -> str:
