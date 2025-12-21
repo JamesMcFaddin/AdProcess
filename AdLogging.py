@@ -15,7 +15,6 @@ import queue
 import shutil
 import logging
 from pathlib import Path
-from datetime import datetime
 from logging.handlers import QueueHandler, QueueListener
 
 import AdConfig as cfg
@@ -37,8 +36,8 @@ __all__ = [
     "UPLOAD","DOWNLOAD","RETRY","STAGE","CONFLICT","SNAPSHOT","SLIDE",
     "TAG",
     "get_logging_level","SetupLogging","CheckLogLevel",
-    "FlushLogs","ShutdownLogging","ShutdownAndArchive",
-    "GetDebugFlagPath","GetActiveLogPath",
+    "FlushLogs","ShutdownLogging","ShutdownAndArchive","ArchiveNow",
+    "GetDebugFlagPath","GetActiveLogPath", "GetLogPaths",
 ]
 
 # -----------------------------------------------------------------------------
@@ -53,7 +52,7 @@ _current_log_level_str: Optional[str] = None
 
 # Exported "active" path for WebAPI (set by SetupLogging)
 _active_log_path: Optional[Path] = None
-
+_sd_log_path: Optional[Path] = None
 
 # -----------------------------------------------------------------------------
 # Public path getters (WebAPI-friendly)
@@ -65,6 +64,12 @@ def GetActiveLogPath() -> str:
     # Empty string means "unknown/not set"
     return str(_active_log_path) if _active_log_path is not None else ""
 
+def GetLogPaths() -> tuple[Path | None, Path | None]:
+    """
+    Returns (ram_log_path, sd_log_path).
+    Either may be None if not available.
+    """
+    return _active_log_path, _sd_log_path
 
 # -----------------------------------------------------------------------------
 # Level toggle via presence of ~/debug (no config cycle)
@@ -157,29 +162,39 @@ def _pick_ram_dir() -> Optional[Path]:
 
 def _resolve_log_path(log_file: str) -> Path:
     """
-    If log_file is "AUTO" or empty, pick tmpfs dir and use AdProcess.log.
-    If log_file is a filename (no parent), place it in tmpfs dir if available.
-    If log_file is a path, use it as-is.
-    If no tmpfs dir exists, fall back to SCRIPT_DIR (SD).
+    Caller passes a canonical SD path like:
+        /home/pi/AdProcess/AdProcess.log
+
+    On Raspberry Pi:
+      - If a tmpfs RAM root exists, write to:
+            <RAM_ROOT>/<project_dir_name>/<filename>
+        Example:
+            /dev/shm/AdProcess/AdProcess.log
+
+      - If no RAM root exists, use the original path.
+
+    On non-Pi:
+      - Use the given path as-is (resolved).
     """
-    s = (log_file or "").strip()
-    ram_dir = _pick_ram_dir()
+    p = Path((log_file or "").strip())
+    if not p:
+        # ultra-safe fallback if caller gave nothing
+        return cfg.SCRIPT_DIR / "AdProcess.log"
 
-    if not s or s.upper() == "AUTO":
-        base = ram_dir if ram_dir is not None else cfg.SCRIPT_DIR
-        return (base / "AdProcess.log")
+    # Non-Pi: boring and predictable
+    if not cfg.IsRaspberryPI():
+        return p.resolve()
 
-    p = Path(s)
-    if p.is_absolute():
+    ram_root = _pick_ram_dir()
+    if ram_root is None:
+        # No tmpfs found → use SD path exactly as provided
         return p
 
-    # Relative: if it's just a name, put in RAM if possible
-    if p.parent == Path("."):
-        base = ram_dir if ram_dir is not None else cfg.SCRIPT_DIR
-        return (base / p.name)
+    # "Project dir name" = parent folder name of the canonical path
+    # /home/pi/AdProcess/AdProcess.log -> "AdProcess"
+    project_dir_name = p.parent.name or "AdProcess"
 
-    # Relative with a folder: interpret relative to current working directory
-    return p.resolve()
+    return ram_root / project_dir_name / p.name
 
 
 # -----------------------------------------------------------------------------
@@ -198,7 +213,7 @@ def SetupLogging(log_file: str = "AUTO") -> None:
       SetupLogging("My.log")    # auto-pick tmpfs + My.log
       SetupLogging("/path/x.log")  # explicit path
     """
-    global _current_log_level_str, _ql, _log_q, _active_log_path
+    global _current_log_level_str, _ql, _log_q, _active_log_path, _sd_log_path
 
     logging.raiseExceptions = False
 
@@ -207,6 +222,7 @@ def SetupLogging(log_file: str = "AUTO") -> None:
     _current_log_level_str = level_str
     level = getattr(logging, level_str, logging.INFO)
 
+    _sd_log_path = Path(log_file).resolve()
     if cfg.IsRaspberryPI():
         log_path = _resolve_log_path(log_file)
     else:
@@ -451,37 +467,60 @@ def ShutdownLogging(timeout_s: float = 0.75) -> None:
 # -----------------------------------------------------------------------------
 def ShutdownAndArchive(timeout_s: float = 0.75) -> None:
     """
-    Stop logging cleanly, then copy today's RAM log into SD under SCRIPT_DIR,
-    and truncate the RAM log so next startup begins fresh.
+    Stop logging cleanly, then copy the RAM log to the canonical SD log path
+    that was passed into SetupLogging().
 
-    Destination:
-        SCRIPT_DIR/logs_archive/AdProcess_YYYY-MM-DD.log
+    - Does NOT invent filenames.
+    - Does NOT truncate RAM log.
+    - Overwrites the SD log (latest snapshot wins).
+    """
+    ShutdownLogging(timeout_s=timeout_s)
 
-    Never raises.
+    src = _active_log_path
+    dst = _sd_log_path
+
+    if src is None or dst is None:
+        return
+    if not src.exists():
+        return
+
+    # Ensure SD parent exists
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    # Cross-filesystem safe (RAM -> SD)
+    shutil.copy2(src, dst)
+
+
+def ArchiveNow() -> bool:
+    """
+    Fast, best-effort snapshot of the current RAM log to the canonical SD log path.
+
+    - Does NOT stop the QueueListener
+    - Does NOT drain/flush the queue (caller can FlushLogs() if desired)
+    - Does NOT stop the player (unrelated)
+    - Overwrites the SD file with whatever is currently in RAM
+    - Never raises
+
+    Returns True on apparent success, False otherwise.
     """
     try:
-        # Stop logging and close the file so copy gets a consistent snapshot
-        ShutdownLogging(timeout_s=timeout_s)
-
         src = _active_log_path
-        if src is None or not src.exists():
-            return
+        dst = _sd_log_path
 
-        archive_dir = cfg.SCRIPT_DIR / "logs_archive"
-        archive_dir.mkdir(parents=True, exist_ok=True)
+        if src is None or dst is None:
+            return False
+        if not src.exists():
+            return False
 
-        stamp = datetime.now().strftime("%Y-%m-%d")
-        dst = archive_dir / f"AdProcess_{stamp}.log"
-
-        # Cross-filesystem safe (RAM -> SD)
-        shutil.copy2(src, dst)
-
-        # Truncate RAM log to start fresh next run
         try:
-            with src.open("wb"):
-                pass
+            dst.parent.mkdir(parents=True, exist_ok=True)
         except Exception:
-            pass
+            # If we can't create the destination directory, bail quickly
+            return False
+
+        # Cross-filesystem safe (RAM -> SD). Overwrite is fine.
+        shutil.copy2(src, dst)
+        return True
 
     except Exception:
-        pass
+        return False

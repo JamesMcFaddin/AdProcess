@@ -32,7 +32,7 @@ from AdLogging import *
 logger = logging.getLogger(__name__)
 
 from threading import Thread
-from WebAPI import StartWebApiServer   # we'll write this next
+from WebAPI import StartWebApiServer, StopWebApiServer
 
 def LaunchWebServer():
     t = Thread(target=StartWebApiServer, daemon=True)
@@ -174,6 +174,8 @@ class AdProcessor:
             if self.quit_process():
                 StopPlayer()
                 self.turn_display(True)
+                StopWebApiServer()
+
                 ShutdownAndArchive()   # archive + stop logging
                 sys.exit(0)
 
@@ -192,8 +194,10 @@ class AdProcessor:
 
                     self.remove_stale_files()
                     SyncFiles()
+                    StopWebApiServer()
                     ShutdownAndArchive()
                     self.reboot_system()
+                    sys.exit(0)
             else:
                 ProcessPlayList()
                 logger.debug(f"{DONE} ********** Processing PlayList done")
@@ -205,11 +209,12 @@ class AdProcessor:
             _shutdown.wait(timeout=float(self.CHECK_INTERVAL))
 
         # Graceful shutdown when SIGTERM/SIGINT is received
-        StopPlayer()
-        self.turn_display(True)
-        logger.debug(f"{DONE} Shutting dowm")
-        ShutdownAndArchive()
+        logger.info(f"{DONE} Shutting down")
+        StopWebApiServer()
+        ShutdownAndArchive()      # drain queue → RAM file
+        ArchiveNow()     # snapshot RAM → SD
         sys.exit(0)
+
 
 #///////////////////////////////////////////////////////////////////////////////
 #

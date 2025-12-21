@@ -10,8 +10,9 @@ import json, shutil, contextlib, logging
 from typing import Dict, List, Any, cast
 
 import AdConfig as cfg
-from AdLogging import PLAY, PL, VID, START, DONE, WARN
-from Player import PlayVideo, GetCurrentlyPlaying
+from AdLogging import PL, VID, START, DONE
+from Player import GetCurrentlyPlaying, StopPlayer, PlayVideo 
+from AdShutdown import ShutdownRequested
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,6 @@ def SyncFiles() -> str:
     if not cloud_video_dir.exists(): logger.debug("%s cloud video dir missing: %s", VID, cloud_video_dir)
     if not local_video_dir.exists(): logger.debug("%s local video dir missing: %s", VID, local_video_dir)
 
-    current = GetCurrentlyPlaying()
     synced_name: str = ""
 
     for name in video_names:
@@ -70,19 +70,46 @@ def SyncFiles() -> str:
         if not _video_needs_sync(src, dst):
             logger.debug("%s up-to-date: %s", VID, name); continue
 
+        # ⛔ Don't start a long copy if shutdown is requested
+        if ShutdownRequested():
+            break
+
         tmp = dst.with_suffix(".tmp")
         try:
-            shutil.copy2(src, tmp); tmp.replace(dst)
-            logger.info("%s synced video: %s", VID, name)
-            synced_name = name
+            shutil.copy2(src, tmp)
 
-            try:
-                if current and Path(current).resolve() == dst.resolve():
-                    logger.info("%s restarting player for updated video: %s", PLAY, name)
-                    PlayVideo(str(dst))
+            # Re-check current AFTER the copy (state may have changed)
+            current = GetCurrentlyPlaying()
+            is_current = bool(current) and Path(current).resolve() == dst.resolve()
 
-            except Exception as e:
-                logger.warning("%s restart attempt failed: %s", WARN, e)
+            if is_current:
+                # If shutdown is requested, don't disrupt playback or swap under it
+                if ShutdownRequested():
+                    with contextlib.suppress(Exception):
+                        if tmp.exists(): tmp.unlink()
+                    break
+
+                StopPlayer()
+
+                # Swap only after we've stopped the player
+                tmp.replace(dst)
+
+                synced_name = name
+                logger.info("%s synced video (was playing): %s", VID, name)
+
+                # Don't start playback if shutdown is requested
+                if ShutdownRequested():
+                    break
+
+                PlayVideo(str(dst))
+
+            else:
+                # Not currently playing: safe to swap in place
+                tmp.replace(dst)
+
+                synced_name = name
+                logger.info("%s synced video: %s", VID, name)
+
             break
 
         except Exception as e:
