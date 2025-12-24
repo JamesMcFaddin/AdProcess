@@ -181,7 +181,7 @@ class AdProcessor:
 
             # 💤 Are we closed right now?
             if wake_time == 0 and not self.is_open():
-                logger.info("Closed. Going to sleep untill we open...")
+                logger.info("Closed. Going to sleep until we open...")
                 StopPlayer()
                 self.turn_display(False)
 
@@ -209,10 +209,9 @@ class AdProcessor:
             _shutdown.wait(timeout=float(self.CHECK_INTERVAL))
 
         # Graceful shutdown when SIGTERM/SIGINT is received
-        logger.info(f"{DONE} Shutting down")
+        logger.info(f"{DONE} Graceful shutdown")
         StopWebApiServer()
         ShutdownAndArchive()      # drain queue → RAM file
-        ArchiveNow()     # snapshot RAM → SD
         sys.exit(0)
 
 

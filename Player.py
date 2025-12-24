@@ -181,7 +181,7 @@ def PlayVideo(target: str) -> bool:
         _stop_fast()
 
     try:
-        logger.info(f"{PLAY} Launching VLC: {p.name}")
+        logger.info(f"{PLAY} Launching VLC: {cmd}")
         PlayerProcess = subprocess.Popen(cmd, **popen_kwargs)  # type: ignore[arg-type]
 
         # Quick “did it immediately die?” probe (short & sweet)

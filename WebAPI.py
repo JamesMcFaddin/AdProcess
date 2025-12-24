@@ -34,7 +34,6 @@ _START_TS = datetime.now()
 _web_srv: Optional[ThreadingHTTPServer] = None
 _web_thread: Optional[threading.Thread] = None
 
-
 class _ReusableThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -45,7 +44,7 @@ class _ReusableThreadingHTTPServer(ThreadingHTTPServer):
 # -----------------------------------------------------------------------------
 
 def _json_bytes(obj: Dict[str, Any]) -> bytes:
-    return json.dumps(obj, indent=2).encode("utf-8")
+    return json.dumps(obj, indent=2, ensure_ascii=False).encode("utf-8")
 
 
 def _safe_int(x: Any, default: int = 0) -> int:

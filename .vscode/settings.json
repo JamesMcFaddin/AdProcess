@@ -2,5 +2,51 @@
     "git.requireGitUserConfig": false,
     "python.analysis.typeCheckingMode": "strict",
     "editor.fontSize": 14,
-    "window.zoomLevel": 0.56
+    "window.zoomLevel": 0.56,
+
+    // ── Spell Checker (Code Spell Checker) ───────────────────────────────
+    "cSpell.enabled": true,
+
+    // Global words (all languages)
+    "cSpell.userWords": [
+        "AdProcess",
+        "AsFlix",
+        "PlayList",
+        "NormalizeTime",
+        "CloudDir",
+        "mpv",
+        "feh",
+        "tmpfs",
+        "wlan0",
+        "apos",
+        "poweron",
+        "dstst",
+        "cvlc",
+        "Xauthority",
+        "killpg",
+        "getpgid",
+        "Prebuild",
+        "writability",
+        "thisweekonly",
+        "xdotool",
+        "creationflags",
+        "Roku",
+        "TvServer"
+    ],
+
+    // Python-only words (keeps other file types clean)
+    "cSpell.languageSettings": [
+        {
+            "languageId": "python",
+            "words": [
+                "AdConfig",
+                "AdProcessor",
+                "ProcessPlayList",
+                "PlayVideo",
+                "VNCplayer",
+                "ROKUplayer",
+                "IsRaspberryPI"
+            ]
+        }
+    ]
 }
