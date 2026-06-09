@@ -2,7 +2,7 @@
     "git.requireGitUserConfig": false,
     "python.analysis.typeCheckingMode": "strict",
     "editor.fontSize": 14,
-    "window.zoomLevel": 0.56,
+    "window.zoomLevel": 2.00,
 
     // ── Spell Checker (Code Spell Checker) ───────────────────────────────
     "cSpell.enabled": true,
@@ -22,6 +22,7 @@
         "poweron",
         "dstst",
         "cvlc",
+        "mibs",
         "Xauthority",
         "killpg",
         "getpgid",

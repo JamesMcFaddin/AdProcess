@@ -42,7 +42,6 @@ __all__ = [
 
 # -----------------------------------------------------------------------------
 # Debug-flag lives in HOME (NOT in AdProcess dir): ~/debug
-_DEBUG_FLAG: Path = (cfg.HOME_DIR / "debug")
 
 # -----------------------------------------------------------------------------
 # Module-level listener + queue + current level cache
@@ -58,7 +57,7 @@ _sd_log_path: Optional[Path] = None
 # Public path getters (WebAPI-friendly)
 
 def GetDebugFlagPath() -> Path:
-    return _DEBUG_FLAG
+    return cfg.DEBUG_FLAG
 
 def GetActiveLogPath() -> str:
     # Empty string means "unknown/not set"
@@ -75,7 +74,7 @@ def GetLogPaths() -> tuple[Path | None, Path | None]:
 # Level toggle via presence of ~/debug (no config cycle)
 def get_logging_level() -> str:
     try:
-        if not _DEBUG_FLAG.exists():
+        if not cfg.DEBUG_FLAG.exists():
             return "INFO"
     except Exception:
         pass
@@ -321,7 +320,7 @@ def SetupLogging(log_file: str = "AUTO") -> None:
         root.addHandler(sh)
 
     root.info("===== Application startup =====")
-    root.debug(f"Initial logging level set to {level_str} (via debug flag {str(_DEBUG_FLAG)!r})")
+    root.debug(f"Initial logging level set to {level_str} (via debug flag {str(cfg.DEBUG_FLAG)!r})")
     root.debug(f"Active log path: {str(log_path)!r} (fs={_mount_type_for(log_path.parent)!r})")
 
 
@@ -481,14 +480,18 @@ def ShutdownAndArchive(timeout_s: float = 0.75) -> None:
 
     if src is None or dst is None:
         return
-    if not src.exists():
-        return
 
-    # Ensure SD parent exists
-    dst.parent.mkdir(parents=True, exist_ok=True)
-
-    # Cross-filesystem safe (RAM -> SD)
+    # 1) RAM → SD (latest snapshot)
     shutil.copy2(src, dst)
+
+    # 2) SD → Archive (dated copy)
+    try:
+        timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+        archive_name = f"{dst.stem}_{timestamp}{dst.suffix}"
+        archive_path = cfg.ARCHIVE_DIR / archive_name
+        shutil.copy2(dst, archive_path)
+    except Exception:
+        pass  # never break shutdown
 
 
 def ArchiveNow() -> bool:
@@ -503,23 +506,17 @@ def ArchiveNow() -> bool:
 
     Returns True on apparent success, False otherwise.
     """
+    src = _active_log_path
+    if src is None:
+        return False
+
     try:
-        src = _active_log_path
-        dst = _sd_log_path
-
-        if src is None or dst is None:
-            return False
-        if not src.exists():
-            return False
-
-        try:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            # If we can't create the destination directory, bail quickly
-            return False
+        timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+        archive_name = f"{src.stem}_{timestamp}{src.suffix}"
+        archive_path = cfg.ARCHIVE_DIR / archive_name
 
         # Cross-filesystem safe (RAM -> SD). Overwrite is fine.
-        shutil.copy2(src, dst)
+        shutil.copy2(src, archive_path)
         return True
 
     except Exception:

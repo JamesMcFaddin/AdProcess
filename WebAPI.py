@@ -26,7 +26,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 import AdConfig as cfg
-from AdLogging import GetDebugFlagPath, CheckLogLevel, GetLogPaths
+from AdLogging import CheckLogLevel, GetLogPaths
 
 HOST, PORT = "0.0.0.0", 8787
 _START_TS = datetime.now()
@@ -340,15 +340,25 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/health":
-            self._send_json({"ok": True, "detail": "adprocess alive"})
+            self._send_json(
+            {
+                "ok": True,
+                "hostname": cfg.REMOTE_NAME,
+                "detail": "adprocess alive"
+            })
+
             return
 
         if path == "/api/info":
+            ram_log, sd_log = _log_paths_snapshot()
+
             self._send_json({
                 "ok": True,
                 "data": {
-                    "hostname": socket.gethostname(),
+                    "hostname": cfg.REMOTE_NAME,
                     "ip": str(cfg.CONFIG.get("DEVICE_IP", _local_ip_best_effort())),
+                    "RamlogPath": str(ram_log),
+                    "SDlogPath": str(sd_log),
                     "version": str(cfg.CONFIG.get("VERSION", "1.x")),
                     "uptime_s": int((datetime.now() - _START_TS).total_seconds()),
                     "thread": threading.get_ident(),
@@ -367,20 +377,50 @@ class Handler(BaseHTTPRequestHandler):
             data = _read_json_file(playlist_path)
 
             if not data:
-                self._send_json({"ok": False, "detail": f"missing or invalid playlist: {playlist_path}"}, 404)
+                self._send_json(
+                {
+                    "ok": False,
+                    "hostname": cfg.REMOTE_NAME,
+                    "detail": f"missing or invalid playlist: {playlist_path}"},
+                    404
+                )
+
             else:
-                self._send_json({"ok": True, "path": str(playlist_path), "playlist": data})
+                self._send_json(
+                {
+                    "ok": True,
+                    "hostname": cfg.REMOTE_NAME,
+                    "path": str(playlist_path), "playlist": data}
+                )
             return
 
         if path == "/api/playlist/ram":
             try:
                 pl: Any = getattr(cfg, "PLAY_LIST", {})
                 if isinstance(pl, dict):
+                    self._send_json(
+                    {
+                        "ok": True,
+                        "hostname": cfg.REMOTE_NAME,
+                        "playlist": pl
+                    })
                     self._send_json({"ok": True, "playlist": pl})
+
                 else:
-                    self._send_json({"ok": True, "playlist": {"_value": pl}})
+                    self._send_json(
+                    {
+                        "ok": True,
+                        "hostname": cfg.REMOTE_NAME,
+                        "playlist": {"_value": pl}
+                    })
+
             except Exception as e:
-                self._send_json({"ok": False, "detail": str(e)}, 500)
+                self._send_json(
+                {
+                    "ok": False,
+                    "hostname": cfg.REMOTE_NAME,
+                    "detail": str(e)
+                }, 500)
             return
 
         # Logs
@@ -399,6 +439,7 @@ class Handler(BaseHTTPRequestHandler):
                 if ram_log and ram_log.exists():
                     lines = _read_all_log_lines(ram_log) if full_file else _read_log_lines(ram_log)
                     logs_obj["ram"] = {
+                        "hostname": cfg.REMOTE_NAME,
                         "path": str(ram_log),
                         "fs": _fs_type(ram_log),
                         "bytes": sum(len(s) + 1 for s in lines),
@@ -412,6 +453,7 @@ class Handler(BaseHTTPRequestHandler):
                 if sd_log and sd_log.exists():
                     lines = _read_all_log_lines(sd_log) if full_file else _read_log_lines(sd_log)
                     logs_obj["sd"] = {
+                        "hostname": cfg.REMOTE_NAME,
                         "path": str(sd_log),
                         "fs": _fs_type(sd_log),
                         "bytes": sum(len(s) + 1 for s in lines),
@@ -424,7 +466,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": True, "logs": logs_obj})
             return
 
-        self._send_json({"ok": False, "detail": f"no GET {path or '/'}"}, 404)
+        self._send_json(
+        {
+            "ok": False,
+            "hostname": cfg.REMOTE_NAME,
+            "detail": f"no GET {path or '/'}"
+        }, 404)
 
     # ----------------------------
     # POST
@@ -445,7 +492,7 @@ class Handler(BaseHTTPRequestHandler):
         # ------------------------------------------------------------------
 
         if path == "/api/quit":
-            quit_path = Path(cfg.HOME_DIR) / "quit"
+            quit_path = cfg.QUIT_FLAG
 
             # Reply first so the client sees success before we shut down the server.
             try:
@@ -455,6 +502,7 @@ class Handler(BaseHTTPRequestHandler):
 
             def _do_quit() -> None:
                 try:
+                    cfg.FLAGS_DIR.mkdir(parents=True, exist_ok=True)
                     quit_path.write_text("1", encoding="utf-8")
                 except Exception:
                     pass
@@ -496,21 +544,21 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         # Log level toggles
-        debug_flag = GetDebugFlagPath()
+        debug_flag = cfg.DEBUG_FLAG
 
         if path == "/api/loglevel/DEBUG":
             try:
+                cfg.FLAGS_DIR.mkdir(parents=True, exist_ok=True)
                 debug_flag.touch(exist_ok=True)
                 CheckLogLevel()
-                self._send_json({"ok": True, "detail": "log level set to DEBUG"})
+                self._send_json({"ok": True, "detail": f"log level set to DEBUG: {debug_flag}"})
             except Exception as e:
                 self._send_json({"ok": False, "detail": str(e)}, 500)
             return
 
         if path == "/api/loglevel/INFO":
             try:
-                if debug_flag.exists():
-                    debug_flag.unlink()
+                debug_flag.unlink(missing_ok=True)
                 CheckLogLevel()
                 self._send_json({"ok": True, "detail": "log level set to INFO"})
             except Exception as e:
@@ -531,6 +579,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self._send_json({"ok": False, "detail": f"no POST {path or '/'}"}, 404)
+
 
 
 # -----------------------------------------------------------------------------

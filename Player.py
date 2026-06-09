@@ -13,6 +13,7 @@ import signal
 import subprocess
 import time
 import logging
+import contextlib
 
 from AdConfig import IsRaspberryPI
 from AdLogging import PLAY, STOP, WARN, FAIL, VID, DONE  # tag emojis
@@ -139,9 +140,68 @@ def StopPlayer() -> None:
         PlayerProcess = None
         VideoBeingPlayed = ""
 
+def _is_valid_mp4(path: Path) -> bool:
+    """
+    Validate that an MP4 is readable before handing it to VLC.
+
+    This catches broken/truncated files such as:
+      - missing moov atom
+      - incomplete copy
+      - zero-byte / corrupt MP4 container
+
+    If ffprobe is not installed, return True and let VLC try.
+    """
+    ffprobe = "/usr/bin/ffprobe"
+
+    if not Path(ffprobe).exists():
+        logger.warning(f"{WARN}{VID} ffprobe not installed; skipping MP4 validation")
+        return True
+
+    try:
+        result = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_type",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            logger.error(f"{FAIL}{VID} Invalid MP4: {path.name}: {detail}")
+            return False
+
+        output = (result.stdout or "").strip()
+        if "video" not in output:
+            logger.error(f"{FAIL}{VID} MP4 has no video stream: {path.name}")
+            return False
+
+        return True
+
+    except subprocess.TimeoutExpired:
+        logger.error(f"{FAIL}{VID} ffprobe timed out validating MP4: {path.name}")
+        return False
+
+    except Exception as e:
+        logger.error(f"{FAIL}{VID} MP4 validation failed: {path.name}: {e}")
+        return False
+
+
 def PlayVideo(target: str) -> bool:
     """
     MP4-only, fast swap:
+      - Validate MP4 before stopping current playback.
       - Prebuild launch cmd/env.
       - Fast-stop current player (tiny waits).
       - Immediately Popen the new VLC process.
@@ -153,8 +213,20 @@ def PlayVideo(target: str) -> bool:
     if not p.exists() or not p.is_file():
         logger.error(f"{FAIL}{VID} Target does not exist or is not a file: {target}")
         return False
+
     if p.suffix.lower() != ".mp4":
         logger.error(f"{FAIL}{VID} Only .mp4 files are supported: {target}")
+        return False
+
+    # Validate BEFORE stopping the current player.
+    # If the new file is corrupt, delete it so SyncFiles()
+    # will fetch a fresh copy next pass.
+    if not _is_valid_mp4(p):
+        logger.warning(f"{WARN}{VID} Deleting invalid MP4 so it can be re-synced: {p}")
+
+        with contextlib.suppress(Exception):
+            p.unlink()
+
         return False
 
     # Build the start command/env FIRST to minimize dark time
@@ -167,7 +239,6 @@ def PlayVideo(target: str) -> bool:
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
         "close_fds": True,
-        # On POSIX, start a new session for clean group signals; on Windows use creationflags
     }
 
     if os.name == "posix":
@@ -176,7 +247,7 @@ def PlayVideo(target: str) -> bool:
         # CREATE_NEW_PROCESS_GROUP = 0x00000200
         popen_kwargs["creationflags"] = 0x00000200
 
-    # Stop existing player with minimal delay
+    # Stop existing player with minimal delay, only after new media passed validation.
     if PlayerProcess and PlayerProcess.poll() is None:
         _stop_fast()
 
@@ -190,6 +261,7 @@ def PlayVideo(target: str) -> bool:
             if PlayerProcess.poll() is not None:
                 logger.error(f"{FAIL}{VID} VLC exited early during startup")
                 PlayerProcess = None
+                VideoBeingPlayed = ""
                 return False
 
         VideoBeingPlayed = str(p.resolve())

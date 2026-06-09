@@ -107,12 +107,24 @@ else
     git clone --branch "$ADPROCESS_VERSION" --depth 1 \
       https://github.com/JamesMcFaddin/AdProcess.git "$HOME/AdProcess"
 
-    # Update local installer from repo (future-proof)
-    if [[ -f "$HOME/AdProcess/service/install_adprocess.sh" ]]; then
-      cp "$HOME/AdProcess/service/install_adprocess.sh" "$HOME/install_adprocess.sh"
-      chmod +x "$HOME/install_adprocess.sh"
-      log "Updated local install_adprocess.sh from repository"
-    fi
+  #--------------------------------------------------
+  # IMPORTANT
+  #
+  # Do NOT replace the currently running installer with
+  # the copy from the repository.
+  #
+  # The repository version may be older than the bootstrap
+  # script that was launched from /boot.
+  #
+  # Rule:
+  #   1. Copy THIS installer to $HOME.
+  #   2. Re-execute the $HOME copy.
+  #   3. Continue using that copy for Phase 2.
+  #
+  # This guarantees the same installer runs for the entire
+  # install process.
+  #--------------------------------------------------
+  log "Keeping current installer for Phase 2"
 
     echo "$ADPROCESS_VERSION" > "$HOME/AdProcess/VERSION"
   else
@@ -140,7 +152,7 @@ if [[ "$NORMAL_MODE" == true ]]; then
   sudo apt autoremove --purge -y
   sudo apt autoclean -y || true
 
-  log "Installing required packages (samba, cifs-utils, git, python3, feh, vlc)..."
+  log "Installing required packages (samba, cifs-utils, git, python3, feh, vlc, ffmpeg)..."
   sudo apt install -y \
     samba samba-common-bin \
     cifs-utils \
@@ -148,7 +160,8 @@ if [[ "$NORMAL_MODE" == true ]]; then
     python3 \
     python3-pip \
     feh \
-    vlc
+    vlc \
+    ffmpeg
 else
   log "Lite mode: skipping apt update/upgrade and package installs."
 fi
@@ -166,8 +179,19 @@ else
   fi
 fi
 
+log "Configuring systemd journal limits..."
+sudo mkdir -p /etc/systemd/journald.conf.d
+sudo tee /etc/systemd/journald.conf.d/adprocess.conf >/dev/null <<EOF
+[Journal]
+SystemMaxUse=100M
+SystemMaxFileSize=10M
+MaxRetentionSec=7day
+EOF
+sudo systemctl restart systemd-journald || true
+
 log "Creating base directories..."
 mkdir -p "$HOME/Cloud"
+mkdir -p "$HOME/Flags"
 mkdir -p "$HOME/AdProcess/config" || true
 
 if [[ "$NORMAL_MODE" == true ]]; then
@@ -187,11 +211,18 @@ fi
 #  - Normal mode: create/modify share + password
 #  - Lite mode: leave server config untouched
 #--------------------------------------------------
+#--------------------------------------------------
+# Samba share for $HOME (server on the Pi)
+#--------------------------------------------------
 if [[ "$NORMAL_MODE" == true ]]; then
+
   log "Configuring Samba share..."
+
   SMB_CONF="/etc/samba/smb.conf"
   SHARE_NAME="AStepUp"
+
   if ! grep -q "^\[$SHARE_NAME\]" "$SMB_CONF"; then
+
     sudo tee -a "$SMB_CONF" >/dev/null <<EOF
 
 [$SHARE_NAME]
@@ -200,55 +231,92 @@ if [[ "$NORMAL_MODE" == true ]]; then
   read only = no
   guest ok = no
   valid users = $SMB_USERNAME
-  force create mode = 0664
-  force directory mode = 2775
+  create mask = 0664
+  directory mask = 0775
 EOF
+
   fi
 
   log "Setting Samba password for $SMB_USERNAME..."
-  if ! sudo pdbedit -L | grep -q "^$SMB_USERNAME:"; then
-    (echo "$SMB_PASSWORD"; echo "$SMB_PASSWORD") | sudo smbpasswd -a "$SMB_USERNAME" >/dev/null
+
+  (
+    echo "$SMB_PASSWORD"
+    echo "$SMB_PASSWORD"
+  ) | sudo smbpasswd -s -a "$SMB_USERNAME" || true
+
+  log "Enabling Samba services..."
+
+  sudo systemctl enable smbd || true
+  sudo systemctl enable nmbd || true
+
+  sudo systemctl restart smbd || true
+  sudo systemctl restart nmbd || true
+
+  log "Verifying Samba services..."
+
+  if systemctl is-active --quiet smbd; then
+      log "SMBD running"
   else
-    (echo "$SMB_PASSWORD"; echo "$SMB_PASSWORD") | sudo smbpasswd "$SMB_USERNAME" >/dev/null || true
+      log "Warning: SMBD failed to start"
   fi
 
-  sudo systemctl enable --now smbd nmbd
-  sudo systemctl restart smbd nmbd
+  if systemctl is-active --quiet nmbd; then
+      log "NMBD running"
+  else
+      log "Warning: NMBD failed to start"
+  fi
+
 else
-  log "Lite mode: skipping Samba server configuration and password changes."
+
+  log "Lite mode: skipping Samba configuration."
+
 fi
 
 #--------------------------------------------------
-# CIFS mount for ~/Cloud (Win11: anonymous via blank password, persistent)
-#   - No automount / idle-timeout (avoids remount races)
-#   - No credentials file
-#   - Boots even if NAS is offline (nofail)
+# CIFS mount for ~/Cloud
+#   - Read-only mount from OfficeDesktop/ADsCloud
+#   - Uses production-proven pireader account
+#   - systemd automount avoids boot/mount timing races
+#   - If unavailable, AdProcess still runs from local videos
 #--------------------------------------------------
-log "Setting up CIFS mount for ~/Cloud (password=, persistent)..."
+log "Setting up CIFS mount for ~/Cloud (best effort)..."
 
 uid=$(id -u); gid=$(id -g)
 MOUNTPOINT="$HOME/Cloud"
 SHARE="//OfficeDesktop/ADsCloud"
-# Keep your proven 'password=' approach; no username supplied.
-OPTS="password=,vers=3.0,uid=$uid,gid=$gid,file_mode=0664,dir_mode=0775,cache=none,_netdev,nofail"
+
+# Proven working options from BackTv.
+OPTS="username=pireader,password=kokopella,vers=3.0,sec=ntlmssp,uid=$uid,gid=$gid,file_mode=0444,dir_mode=0555,cache=loose,actimeo=60,iocharset=utf8,_netdev,x-systemd.automount,x-systemd.idle-timeout=30s,nofail"
 ENTRY="$SHARE  $MOUNTPOINT  cifs  $OPTS  0  0"
 
 sudo mkdir -p "$MOUNTPOINT"
 
-# Replace any existing fstab line for this share+mount (regardless of old options), else append
-if sudo grep -Eq "^[^#]*//192\.168\.1\.245/ADsCloud[[:space:]]+$MOUNTPOINT[[:space:]]+cifs" /etc/fstab; then
-  sudo sed -i "s|^[^#]*//192\.168\.1\.245/ADsCloud[[:space:]]\+$MOUNTPOINT[[:space:]]\+cifs[[:space:]].*|$ENTRY|" /etc/fstab
+# Replace any existing fstab line for ADsCloud mounted at this mountpoint.
+if sudo grep -Eq "^[^#]*//([^[:space:]]+)/ADsCloud[[:space:]]+$MOUNTPOINT[[:space:]]+cifs" /etc/fstab; then
+  sudo sed -i "s|^[^#]*//[^[:space:]]*/ADsCloud[[:space:]]\+$MOUNTPOINT[[:space:]]\+cifs[[:space:]].*|$ENTRY|" /etc/fstab
 else
   echo "$ENTRY" | sudo tee -a /etc/fstab >/dev/null
 fi
 
+sudo systemctl daemon-reload
 sudo systemctl daemon-reexec
 
-# Remount to apply new options
+#--------------------------------------------------
+# Apply CIFS mount (best effort)
+# AdProcess can run from local videos even if Cloud sync is unavailable.
+#--------------------------------------------------
+log "Applying CIFS mount (best effort)..."
+
 if mountpoint -q "$MOUNTPOINT"; then
-  sudo umount "$MOUNTPOINT" || true
+  sudo umount "$MOUNTPOINT" || \
+    log "Warning: failed to unmount existing $MOUNTPOINT"
 fi
-sudo mount "$MOUNTPOINT" || sudo mount -a || true
+
+if sudo mount "$MOUNTPOINT"; then
+  log "CIFS mount succeeded: $MOUNTPOINT"
+else
+  log "Warning: CIFS mount failed. AdProcess will continue using local files."
+fi
 
 #--------------------------------------------------
 # Enable VNC (if supported) — normal mode only

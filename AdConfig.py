@@ -7,7 +7,7 @@
 from __future__ import annotations
 import json, platform, socket, logging
 from pathlib import Path
-from typing import Any, Mapping, Tuple, Literal, cast
+from typing import Any, Mapping, Literal, cast
 from AdConfigTypes import ConfigDefaults, PlayListDoc
 
 logger = logging.getLogger(__name__)
@@ -113,26 +113,32 @@ def _atomic_write(path: Path, data: Mapping[str, Any]) -> bool:
 
 ###############################################################################
 #
-def LoadConfig(cFile: str, defaults: Mapping[str, Any]) -> Tuple[dict[str, Any], Source]:
-    p = Path(cFile)
+def LoadConfig(path: Path | str, defaults: Mapping[str, Any]) -> dict[str, Any]:
+    p = Path(path)
+
     try:
-        return _load_json(p), "current"
-    except Exception as e1:
-        logger.warning("Load failed for %s: %s", p, e1)
+        return _load_json(p)
+
+    except Exception:
         seeded = _atomic_write(p, defaults)
         if seeded:
-            logger.info("Seeded defaults into %s; attempting reload", p)
             try:
-                return _load_json(p), "current"
-            except Exception as e2:
-                logger.error("Reload failed after seeding %s: %s; using in-code defaults", p, e2)
-        else:
-            logger.warning("Seeding skipped/failed for %s; using in-code defaults", p)
-        return _copy_defaults(defaults), "defaults"
+                return _load_json(p)
+            except Exception:
+                pass
 
-def LoadConfigOnly(path: str, defaults: Mapping[str, Any]) -> dict[str, Any]:
-    cfg, _src = LoadConfig(path, defaults)
-    return cfg
+        return _copy_defaults(defaults)
+
+# Base RAM location (same logic style as Logger)
+def _get_ram_base() -> Path:
+    try:
+        ram = Path("/dev/shm")
+        if ram.exists() and ram.is_dir():
+            return ram
+    except Exception:
+        pass
+
+    return Path("/tmp")  # fallback
 
 ###############################################################################
 # Resolve the absolute directory of the running script
@@ -140,6 +146,13 @@ def LoadConfigOnly(path: str, defaults: Mapping[str, Any]) -> dict[str, Any]:
 SCRIPT_DIR = Path(__file__).resolve().parent
 HOME_DIR = SCRIPT_DIR.parent
 CLOUD_DIR = (HOME_DIR / "Cloud")
+ARCHIVE_DIR = (HOME_DIR / "Archive")
+
+# Resolve paths used by the watchdog heartbeat
+FLAGS_DIR = HOME_DIR / "Flags"
+HEARTBEAT_FILE = FLAGS_DIR / "AdProcess.mon"
+QUIT_FLAG = FLAGS_DIR / "quit-AdProcess"
+DEBUG_FLAG = FLAGS_DIR / "debug-AdProcess"
 
 REMOTE_NAME = socket.gethostname()
 
@@ -148,5 +161,13 @@ LOCAL_VIDEOS  = str((HOME_DIR / "Videos").resolve())
 CLOUD_CONFIGS = str((CLOUD_DIR / "Configs" / REMOTE_NAME).resolve())
 CLOUD_VIDEOS  = str((CLOUD_DIR / "AdVideos").resolve())
 
-CONFIG    = cast(ConfigDefaults, LoadConfigOnly(str(Path(LOCAL_CONFIGS) / "config.json"),  configDefaults))
-PLAY_LIST = cast(PlayListDoc,   LoadConfigOnly(str(Path(LOCAL_CONFIGS) / "PlayList.json"), DefaultPlayList))
+CONFIG    = cast(ConfigDefaults, LoadConfig(str(Path(LOCAL_CONFIGS) / "config.json"),  configDefaults))
+PLAY_LIST = cast(PlayListDoc,   LoadConfig(str(Path(LOCAL_CONFIGS) / "PlayList.json"), DefaultPlayList))
+
+RAM_BASE = _get_ram_base()
+RAM_ROOT = RAM_BASE / "PiNotify"
+
+# PiNotify-owned mailbox directories (RAM-backed)
+INBOX_DIR      = RAM_ROOT / "Inbox"
+OUTBOX_DIR     = RAM_ROOT / "Outbox"
+

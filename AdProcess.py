@@ -19,7 +19,8 @@ _tracer = sys.gettrace()
 if _tracer is not None:
     threading.settrace(_tracer)
 
-from AdConfig import IsRaspberryPI, HOME_DIR, SCRIPT_DIR
+import AdConfig as cfg
+from AdConfig import IsRaspberryPI, SCRIPT_DIR, HEARTBEAT_FILE
 from AdConfig import CONFIG, PLAY_LIST, LOCAL_VIDEOS
 from AdConfigTypes import DayHours
 
@@ -123,12 +124,28 @@ class AdProcessor:
     #///////////////////////////////////////////////////////////////////////////////
     #
     def quit_process(self) -> bool:
-        if (Path(HOME_DIR) / "quit").exists():
+        if cfg.QUIT_FLAG.exists():
             logger.info("Detected quit file. Exiting.")
-            os.remove((Path(HOME_DIR) / "quit"))
+            cfg.QUIT_FLAG.unlink(missing_ok=True)
+            
             return True
 
         return False
+
+    def touch_heartbeat(self) -> None:
+        try:
+            HEARTBEAT_FILE.touch()
+            logger.debug("Heartbeat touched: %s", HEARTBEAT_FILE)
+        except Exception as e:
+            logger.warning("Failed to touch heartbeat %s: %s", HEARTBEAT_FILE, e)
+
+    def clear_heartbeat(self) -> None:
+        try:
+            if HEARTBEAT_FILE.exists():
+                HEARTBEAT_FILE.unlink()
+                logger.info("Heartbeat removed: %s", HEARTBEAT_FILE)
+        except Exception as e:
+            logger.warning("Failed to remove heartbeat %s: %s", HEARTBEAT_FILE, e)
 
     #///////////////////////////////////////////////////////////////////////////
     # Turn HDMI display on or off, if not debugging, on Raspberry Pi.
@@ -169,6 +186,7 @@ class AdProcessor:
         while not _shutdown.is_set():
             # See if the logging level changed
             CheckLogLevel()
+            self.touch_heartbeat()
 
             # External quit triggered
             if self.quit_process():
@@ -177,6 +195,7 @@ class AdProcessor:
                 StopWebApiServer()
 
                 ShutdownAndArchive()   # archive + stop logging
+                os.remove(HEARTBEAT_FILE)
                 sys.exit(0)
 
             # 💤 Are we closed right now?
@@ -196,6 +215,7 @@ class AdProcessor:
                     SyncFiles()
                     StopWebApiServer()
                     ShutdownAndArchive()
+                    os.remove(HEARTBEAT_FILE)
                     self.reboot_system()
                     sys.exit(0)
             else:
@@ -212,6 +232,7 @@ class AdProcessor:
         logger.info(f"{DONE} Graceful shutdown")
         StopWebApiServer()
         ShutdownAndArchive()      # drain queue → RAM file
+        os.remove(HEARTBEAT_FILE)
         sys.exit(0)
 
 
