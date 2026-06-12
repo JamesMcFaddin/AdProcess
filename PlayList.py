@@ -15,22 +15,63 @@ import logging
 from AdLogging import *
 logger = logging.getLogger(__name__)
 
-def NormalizeDay(now: datetime.datetime, threshold: int = 6) -> str:
+def ConfigTimeToMinutes(strTime: str, default: str = "06:00") -> int:
     """
-    Returns the OpenHours key ("Mon", "Tue", ...) for the *business day*.
-    If time is before rollover_hour, count it as previous day.
+    Convert HH:MM config time into minutes past midnight.
+    Used for BusinessDayStarts and other raw clock values.
     """
-    if now.hour < threshold:
-        now = now - datetime.timedelta(days=1)
-    return now.strftime("%a")  # "Mon", "Tue", etc.
+    if not strTime:
+        strTime = default
 
-def NormalizeTime(strTime: str, adjust: bool = True, threshold: int = 6) -> int:
+    hours, minutes = map(int, strTime.split(":"))
+    return hours * 60 + minutes
+
+
+def BusinessDayStartsMinutes() -> int:
+    """
+    Return the configured business-day rollover/start time in minutes.
+    Example: "06:00" -> 360
+    """
+    return ConfigTimeToMinutes(
+        cast(str, CONFIG.get("BusinessDayStarts", "06:00")),
+        "06:00",
+    )
+
+
+def NormalizeDay(now: datetime.datetime) -> str:
+    """
+    Returns the OpenHours key ("Mon", "Tue", ...) for the business day.
+
+    If the current time is before BusinessDayStarts, count it as
+    part of the previous business day.
+    """
+    if (now.hour * 60 + now.minute) < BusinessDayStartsMinutes():
+        now = now - datetime.timedelta(days=1)
+
+    return now.strftime("%a")
+
+def NormalizeTime(strTime: str, adjust: bool = True) -> int:
+    """
+    Convert HH:MM into comparable business-day minutes.
+
+    With BusinessDayStarts = 06:00:
+        11:00 -> 660
+        22:00 -> 1320
+        02:00 -> 1560
+        05:59 -> 1799
+
+    This intentionally allows values over 1440.
+    """
     if not strTime:
         return -1
+
     hours, minutes = map(int, strTime.split(":"))
-    if adjust and 0 <= hours < threshold:
+
+    if adjust and (hours * 60 + minutes) < BusinessDayStartsMinutes():
         hours += 24
+
     return hours * 60 + minutes
+
 
 def ProcessPlayList() -> None:
     logger.debug(f"{START} Processing PlayList starting **********")

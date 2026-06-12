@@ -49,50 +49,90 @@ class AdProcessor:
 
     CHECK_INTERVAL = 30
 
+    # Initialize the processor and load the open/close minutes
+    # for the current business day.
     def __init__(self):
         self.refresh_open_close_minutes()
 
+    # Reboot the system when running on a Raspberry Pi.
+    # Does nothing on development machines.
     def reboot_system(self):
         if IsRaspberryPI():
             subprocess.run(["/usr/bin/systemctl", "reboot"], check=False)
 
+    # Return True when the current normalized time falls within
+    # the venue's open window. A 30-minute buffer is allowed
+    # before opening and after closing.
     def is_open(self) -> bool:
         now = NormalizeTime(datetime.datetime.now().strftime("%H:%M"))
-        return (self.open_minutes-30) <= now <= (self.close_minutes+30)
+        return (self.open_minutes - 30) <= now <= (self.close_minutes + 30)
 
+    # Return the normalized business-day minute at which the
+    # system should wake or reboot.
+    #
+    # Example:
+    #     Open = 11:00
+    #     Offset = -30
+    #     Returns 10:30 (630)
     def compute_wake_time(self, offset_minutes: int = -30) -> int:
-        """
-        Compute the wake-up time (in minutes from now), offset from open time.
-        """
         wake_time = self.open_minutes + offset_minutes
         return wake_time
 
+    # Return the current raw clock time as minutes past midnight.
+    #
+    # This is NOT normalized business-day time.
+    #
+    # Examples:
+    #     01:00 -> 60
+    #     22:00 -> 1320
     def current_minutes(self) -> int:
-        """
-        Return the current time as minutes past midnight (0–1439).
-        """
         now = datetime.datetime.now()
         return now.hour * 60 + now.minute
 
+    # Load open/close times for the current business day.
+    #
+    # NormalizeDay() determines which business day applies.
+    # Early-morning hours (for example 01:00) may belong to
+    # the previous business day depending on BusinessDayStarts.
+    #
+    # NormalizeTime() converts open and close times into
+    # comparable business-day minutes so that times crossing
+    # midnight compare correctly.
     def refresh_open_close_minutes(self):
-        d = NormalizeDay(datetime.datetime.now(), 2)
-        if d == self.day:
+        now = datetime.datetime.now()
+        now_minutes = NormalizeTime(now.strftime("%H:%M"))
+
+        if now_minutes >= 24 * 60:
+            business_day = (now - datetime.timedelta(days=1)).strftime("%a")
+        else:
+            business_day = now.strftime("%a")
+
+        if business_day == self.day:
             return
 
+        self.day = business_day
+
         try:
-            self.day = d
             hours = cast(DayHours, CONFIG["OpenHours"][self.day])
-            open_time  = hours["open"]
+            open_time = hours["open"]
             close_time = hours["close"]
 
         except Exception as e:
-            logger.warning("Invalid OpenHours %s", e)
-            open_time = '11:00'
-            close_time = '2:00'
+            logger.warning("Invalid OpenHours for %s: %s", self.day, e)
+            open_time = "11:00"
+            close_time = "2:00"
 
-        logger.warning(f"Today ({self.day}) we open at {open_time} and close at {close_time}")
         self.open_minutes = NormalizeTime(open_time)
         self.close_minutes = NormalizeTime(close_time)
+
+        logger.warning(
+            "Business day %s opens at %s (%d) and closes at %s (%d)",
+            self.day,
+            open_time,
+            self.open_minutes,
+            close_time,
+            self.close_minutes,
+        )
 
     #///////////////////////////////////////////////////////////////////////////////
     #

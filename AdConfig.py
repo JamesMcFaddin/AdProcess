@@ -15,6 +15,8 @@ Source = Literal["current", "defaults"]
 
 ###############################################################################
 configDefaults: dict[str, Any] = {
+    "BusinessDayStarts": "06:00",
+
     "OpenHours": {
         "Mon": {"open": "11:00", "close": "2:00"},
         "Tue": {"open": "11:00", "close": "2:00"},
@@ -148,12 +150,6 @@ HOME_DIR = SCRIPT_DIR.parent
 CLOUD_DIR = (HOME_DIR / "Cloud")
 ARCHIVE_DIR = (HOME_DIR / "Archive")
 
-# Resolve paths used by the watchdog heartbeat
-FLAGS_DIR = HOME_DIR / "Flags"
-HEARTBEAT_FILE = FLAGS_DIR / "AdProcess.mon"
-QUIT_FLAG = FLAGS_DIR / "quit-AdProcess"
-DEBUG_FLAG = FLAGS_DIR / "debug-AdProcess"
-
 REMOTE_NAME = socket.gethostname()
 
 LOCAL_CONFIGS = str((SCRIPT_DIR / "config").resolve())
@@ -165,9 +161,17 @@ CONFIG    = cast(ConfigDefaults, LoadConfig(str(Path(LOCAL_CONFIGS) / "config.js
 PLAY_LIST = cast(PlayListDoc,   LoadConfig(str(Path(LOCAL_CONFIGS) / "PlayList.json"), DefaultPlayList))
 
 RAM_BASE = _get_ram_base()
-RAM_ROOT = RAM_BASE / "PiNotify"
+RUNTIME_DIR = RAM_BASE / "AdProcess"
+RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+
+FLAGS_DIR = RUNTIME_DIR / "Flags"
+FLAGS_DIR.mkdir(parents=True, exist_ok=True)
+
+HEARTBEAT_FILE = FLAGS_DIR / "AdProcess.mon"
+QUIT_FLAG = FLAGS_DIR / "quit-AdProcess"
+DEBUG_FLAG = FLAGS_DIR / "debug-AdProcess"
 
 # PiNotify-owned mailbox directories (RAM-backed)
-INBOX_DIR      = RAM_ROOT / "Inbox"
-OUTBOX_DIR     = RAM_ROOT / "Outbox"
+INBOX_DIR      = RUNTIME_DIR / "Inbox"
+OUTBOX_DIR     = RUNTIME_DIR / "Outbox"
 
