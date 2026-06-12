@@ -7,8 +7,9 @@
 import datetime
 import os
 from pathlib import Path
+from typing import cast
 
-from AdConfig import PLAY_LIST, LOCAL_VIDEOS
+from AdConfig import PLAY_LIST, LOCAL_VIDEOS, CONFIG
 from Player import PlayVideo, GetCurrentlyPlaying
 
 import logging

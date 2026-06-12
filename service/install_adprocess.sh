@@ -16,13 +16,27 @@ log() { echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOGFILE"; }
 #   the main installer flow.
 #--------------------------------------------------
 
+get_ram_base() {
+  if [[ -d /dev/shm ]]; then
+    echo "/dev/shm"
+  else
+    echo "/tmp"
+  fi
+}
+
 request_components_stop() {
-  local FLAGS_DIR="$HOME/Flags"
+  local RAM_BASE
+  local RUNTIME_DIR
+  local FLAGS_DIR
   local STOP_TIMEOUT_SECONDS=300
   local STOP_POLL_SECONDS=5
 
+  RAM_BASE="$(get_ram_base)"
+  RUNTIME_DIR="$RAM_BASE/AdProcess"
+  FLAGS_DIR="$RUNTIME_DIR/Flags"
+
   if [[ ! -d "$FLAGS_DIR" ]]; then
-    log "No Flags directory found. No running components to stop."
+    log "No runtime Flags directory found. No running components to stop."
     return 0
   fi
 
@@ -32,6 +46,12 @@ request_components_stop() {
 
   if [[ ${#mon_files[@]} -eq 0 ]]; then
     log "No monitored components found."
+
+    if [[ -d "$RUNTIME_DIR" ]]; then
+      log "Removing stale runtime directory: $RUNTIME_DIR"
+      rm -rf "$RUNTIME_DIR" || true
+    fi
+
     return 0
   fi
 
@@ -41,8 +61,8 @@ request_components_stop() {
   local component
 
   # Example:
-  #   ~/Flags/AdProcess.mon
-  #       creates ~/Flags/quit-AdProcess
+  #   /dev/shm/AdProcess/Flags/AdProcess.mon
+  #       creates /dev/shm/AdProcess/Flags/quit-AdProcess
   for mon_file in "${mon_files[@]}"; do
     component="$(basename "$mon_file" .mon)"
     log "Stopping: $component"
@@ -61,6 +81,12 @@ request_components_stop() {
     if [[ ${#mon_files[@]} -eq 0 ]]; then
       echo
       log "All monitored components stopped."
+
+      if [[ -d "$RUNTIME_DIR" ]]; then
+        log "Removing runtime directory: $RUNTIME_DIR"
+        rm -rf "$RUNTIME_DIR" || true
+      fi
+
       return 0
     fi
 
@@ -128,18 +154,27 @@ fi
 #   ecosystem components to shut down cleanly.
 #
 # Mechanism:
-#   ~/Flags/*.mon identifies monitored components.
+#   Runtime Flags are RAM-backed under:
+#
+#       /dev/shm/AdProcess/Flags
+#
+#   or, if /dev/shm is unavailable:
+#
+#       /tmp/AdProcess/Flags
+#
+#   *.mon files identify monitored components.
 #   For each heartbeat file found, this creates:
 #
-#       ~/Flags/<Component>-quit
+#       quit-<Component>
 #
 # Example:
-#   ~/Flags/AdProcess.mon
-#       creates ~/Flags/AdProcess-quit
+#   /dev/shm/AdProcess/Flags/AdProcess.mon
+#       creates /dev/shm/AdProcess/Flags/quit-AdProcess
 #
 # Notes:
-#   Fresh installs normally have no ~/Flags directory
-#   and no *.mon files, so this step exits immediately.
+#   Fresh installs normally have no runtime Flags
+#   directory and no *.mon files, so this step exits
+#   immediately.
 #
 #   Existing installs may have active processes. This
 #   gives them up to 5 minutes to observe the quit file,
@@ -536,9 +571,9 @@ sudo systemctl restart systemd-journald || true
 #   ~/Cloud
 #       CIFS-mounted ADsCloud share from OfficeDesktop.
 #
-#   ~/Flags
-#       Runtime flags, heartbeat files, debug toggles,
-#       quit requests, and watchdog state files.
+#   ~/Archive
+#       Persistent storage for archived logs,
+#       diagnostics, and support files.
 #
 #   ~/AdProcess/config
 #       Local AdProcess configuration files.
@@ -551,7 +586,7 @@ sudo systemctl restart systemd-journald || true
 #--------------------------------------------------
 log "Creating base directories..."
 mkdir -p "$HOME/Cloud"
-mkdir -p "$HOME/Flags"
+mkdir -p "$HOME/Archive"
 mkdir -p "$HOME/AdProcess/config" || true
 
 #--------------------------------------------------
@@ -756,12 +791,29 @@ fi
 #   Duplicate AdProcess.py entries are prevented.
 #--------------------------------------------------
 if [[ "$NORMAL_MODE" == true ]]; then
+  log "Configuring LabWC autostart for AdProcess..."
+
   AUTOSTART_FILE="$HOME/.config/labwc/autostart"
+  AUTOSTART_CMD="exec /usr/bin/python3 $HOME/AdProcess/AdProcess.py &"
+  AUTOSTART_MARKER="# AdProcess autostart"
+
   mkdir -p "$(dirname "$AUTOSTART_FILE")"
-  if ! grep -q "AdProcess.py" "$AUTOSTART_FILE" 2>/dev/null; then
-    echo "exec /usr/bin/python3 $HOME/AdProcess/AdProcess.py &" >> "$AUTOSTART_FILE"
-    chmod +x "$AUTOSTART_FILE" || true
-  fi
+  touch "$AUTOSTART_FILE"
+
+  # Remove any previous AdProcess autostart lines, including old paths
+  # or commented/stale entries that would make a simple grep unreliable.
+  sed -i '/AdProcess\.py/d' "$AUTOSTART_FILE"
+  sed -i '/# AdProcess autostart/d' "$AUTOSTART_FILE"
+
+  {
+    echo ""
+    echo "$AUTOSTART_MARKER"
+    echo "$AUTOSTART_CMD"
+  } >> "$AUTOSTART_FILE"
+
+  chmod +x "$AUTOSTART_FILE" || true
+
+  log "LabWC autostart configured: $AUTOSTART_CMD"
 else
   log "Lite mode: leaving autostart unchanged."
 fi
