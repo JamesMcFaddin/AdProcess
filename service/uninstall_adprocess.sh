@@ -167,7 +167,23 @@ sudo systemctl disable pi-watchdog.timer 2>/dev/null || true
 sudo rm -f /etc/systemd/system/pi-watchdog.timer
 sudo rm -f /etc/systemd/system/pi-watchdog.service
 
+#--------------------------------------------------
+# Refresh systemd state
+#
+# Purpose:
+#   Forget removed unit files and clear any remembered
+#   failure state from previous installs.
+#
+# Notes:
+#   Without reset-failed, systemctl status may continue
+#   showing "Loaded: not-found, Active: failed" for
+#   units that no longer exist.
+#--------------------------------------------------
+log "Refreshing systemd configuration..."
 sudo systemctl daemon-reload || true
+
+log "Clearing failed systemd unit history..."
+sudo systemctl reset-failed || true
 
 #--------------------------------------------------
 # Remove LabWC autostart entry
