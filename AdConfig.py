@@ -160,16 +160,17 @@ CLOUD_VIDEOS  = str((CLOUD_DIR / "AdVideos").resolve())
 CONFIG    = cast(ConfigDefaults, LoadConfig(str(Path(LOCAL_CONFIGS) / "config.json"),  configDefaults))
 PLAY_LIST = cast(PlayListDoc,   LoadConfig(str(Path(LOCAL_CONFIGS) / "PlayList.json"), DefaultPlayList))
 
-RAM_BASE = _get_ram_base()
-RUNTIME_DIR = RAM_BASE / "AdProcess"
+RAM_BASE: Path = _get_ram_base()
+
+RUNTIME_DIR: Path = RAM_BASE / "AdProcess"
 RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 
-FLAGS_DIR = RUNTIME_DIR / "Flags"
+FLAGS_DIR: Path = RUNTIME_DIR / "Flags"
 FLAGS_DIR.mkdir(parents=True, exist_ok=True)
 
-HEARTBEAT_FILE = FLAGS_DIR / "AdProcess.mon"
-QUIT_FLAG = FLAGS_DIR / "quit-AdProcess"
-DEBUG_FLAG = FLAGS_DIR / "debug-AdProcess"
+HEARTBEAT_FILE: Path = FLAGS_DIR / "AdProcess.mon"
+QUIT_FLAG: Path = FLAGS_DIR / "quit-AdProcess"
+DEBUG_FLAG: Path = FLAGS_DIR / "debug-AdProcess"
 
 # PiNotify-owned mailbox directories (RAM-backed)
 INBOX_DIR      = RUNTIME_DIR / "Inbox"

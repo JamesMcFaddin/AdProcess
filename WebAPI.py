@@ -21,6 +21,7 @@ import socket
 import threading
 import subprocess
 import os
+import time
 
 import logging
 logger = logging.getLogger(__name__)
@@ -33,6 +34,13 @@ _START_TS = datetime.now()
 
 _web_srv: Optional[ThreadingHTTPServer] = None
 _web_thread: Optional[threading.Thread] = None
+_monitor_thread: Optional[threading.Thread] = None
+_web_lock = threading.RLock()
+
+OFFICEDESKTOP_CHECK_SECONDS = 60
+OFFICEDESKTOP_CONNECT_TIMEOUT_SECONDS = 5
+OFFICEDESKTOP_HOST = "OfficeDesktop"
+OFFICEDESKTOP_PORT = 445
 
 class _ReusableThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
@@ -492,7 +500,7 @@ class Handler(BaseHTTPRequestHandler):
         # ------------------------------------------------------------------
 
         if path == "/api/quit":
-            quit_path = cfg.QUIT_FLAG
+            quit_path = Path(cfg.QUIT_FLAG)
 
             # Reply first so the client sees success before we shut down the server.
             try:
@@ -544,7 +552,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         # Log level toggles
-        debug_flag = cfg.DEBUG_FLAG
+        debug_flag = Path(cfg.DEBUG_FLAG)
 
         if path == "/api/loglevel/DEBUG":
             try:
@@ -582,6 +590,145 @@ class Handler(BaseHTTPRequestHandler):
 
 
 
+
+# -----------------------------------------------------------------------------
+# OfficeDesktop reachability monitor / WebAPI self-heal
+# -----------------------------------------------------------------------------
+
+def _officedesktop_reachable(
+    host: str = OFFICEDESKTOP_HOST,
+    port: int = OFFICEDESKTOP_PORT,
+    timeout_seconds: int = OFFICEDESKTOP_CONNECT_TIMEOUT_SECONDS,
+) -> bool:
+    """
+    Check whether OfficeDesktop is reachable from this Pi.
+
+    This detects the real-world condition where OfficeDesktop leaves TvLand
+    and later returns. When OfficeDesktop becomes reachable again, the WebAPI
+    listener is restarted so clients can reconnect without rebooting the Pi
+    or restarting the full AdProcess system.
+    """
+    try:
+        with socket.create_connection((host, port), timeout=timeout_seconds):
+            return True
+    except Exception as e:
+        logger.debug(
+            "OfficeDesktop reachability check failed: %s:%s: %r",
+            host,
+            port,
+            e,
+        )
+        return False
+
+
+def _start_webapi_thread(host: str = HOST, port: int = PORT) -> None:
+    """
+    Start the blocking WebAPI server loop in its own daemon thread.
+
+    Safe to call repeatedly. If the existing thread appears alive, it does
+    nothing. If the previous server died or was stopped, it starts a new one.
+    """
+    global _web_thread
+
+    with _web_lock:
+        if _web_thread and _web_thread.is_alive():
+            return
+
+        _web_thread = threading.Thread(
+            target=StartWebApiServer,
+            args=(host, port),
+            name="WebAPI",
+            daemon=True,
+        )
+        _web_thread.start()
+
+
+def RestartWebApiServer(reason: str = "") -> None:
+    """
+    Restart only the WebAPI listener/thread.
+
+    This does not restart AdProcess, VLC, the Pi, or the main processing loop.
+    """
+    if reason:
+        logger.warning("Restarting WebAPI: %s", reason)
+    else:
+        logger.warning("Restarting WebAPI")
+
+    StopWebApiServer()
+
+    # Give the socket a brief moment to release before rebinding.
+    time.sleep(1)
+
+    _start_webapi_thread(HOST, PORT)
+
+
+def _webapi_monitor_loop() -> None:
+    """
+    Background monitor that watches for OfficeDesktop to leave and return.
+
+    The useful transition is:
+
+        reachable -> unreachable -> reachable
+
+    When OfficeDesktop becomes reachable again, restart only the WebAPI
+    listener. This gives the browser/client a fresh listener without rebooting
+    the Pi and without restarting the main AdProcess video loop.
+    """
+    last_reachable: Optional[bool] = None
+
+    # Let startup settle before the first network check.
+    time.sleep(OFFICEDESKTOP_CHECK_SECONDS)
+
+    while True:
+        try:
+            reachable = _officedesktop_reachable()
+
+            if last_reachable is None:
+                logger.info(
+                    "OfficeDesktop monitor started: %s:%s reachable=%s",
+                    OFFICEDESKTOP_HOST,
+                    OFFICEDESKTOP_PORT,
+                    reachable,
+                )
+
+            elif reachable != last_reachable:
+                if reachable:
+                    logger.warning(
+                        "OfficeDesktop is reachable again; refreshing WebAPI listener."
+                    )
+                    RestartWebApiServer("OfficeDesktop returned to TvLand")
+                else:
+                    logger.warning(
+                        "OfficeDesktop is no longer reachable from this Pi."
+                    )
+
+            last_reachable = reachable
+
+        except Exception as e:
+            logger.warning("WebAPI monitor exception: %r", e)
+
+        time.sleep(OFFICEDESKTOP_CHECK_SECONDS)
+
+
+def StartWebApiMonitor() -> None:
+    """
+    Start the WebAPI/OfficeDesktop monitor once.
+    """
+    global _monitor_thread
+
+    with _web_lock:
+        if _monitor_thread and _monitor_thread.is_alive():
+            return
+
+        _monitor_thread = threading.Thread(
+            target=_webapi_monitor_loop,
+            name="WebAPI-Monitor",
+            daemon=True,
+        )
+        _monitor_thread.start()
+        logger.info("WebAPI monitor started")
+
+
 # -----------------------------------------------------------------------------
 # Server exit
 # -----------------------------------------------------------------------------
@@ -592,13 +739,19 @@ def StopWebApiServer() -> None:
     Safe to call multiple times.
     """
     global _web_srv
+
+    with _web_lock:
+        srv = _web_srv
+        _web_srv = None
+
+    if not srv:
+        return
+
     try:
-        if _web_srv:
-            logger.info("WebAPI stopping...")
-            _web_srv.shutdown()      # breaks serve_forever()
-            _web_srv.server_close()  # releases socket
-            _web_srv = None
-            logger.info("WebAPI stopped")
+        logger.info("WebAPI stopping...")
+        srv.shutdown()      # breaks serve_forever()
+        srv.server_close()  # releases socket
+        logger.info("WebAPI stopped")
     except Exception as e:
         logger.warning("WebAPI stop failed: %r", e)
 
@@ -610,18 +763,37 @@ def StopWebApiServer() -> None:
 def StartWebApiServer(host: str = HOST, port: int = PORT) -> None:
     """
     Blocking server loop. Run this in a daemon thread from AdProcess.
+
+    This function starts the WebAPI/OfficeDesktop monitor once, then blocks in
+    serve_forever(). If OfficeDesktop leaves and returns to TvLand, the monitor
+    can refresh the WebAPI listener without restarting AdProcess.
     """
     global _web_srv
+
     try:
-        _web_srv = _ReusableThreadingHTTPServer((host, port), Handler)
+        with _web_lock:
+            _web_srv = _ReusableThreadingHTTPServer((host, port), Handler)
+
         logger.info("WebAPI listening on %s:%s", host, port)
-        _web_srv.serve_forever()
+
+        # Start monitor from the first WebAPI launch. It is guarded so repeated
+        # calls do not create duplicate monitor threads.
+        StartWebApiMonitor()
+
+        srv = _web_srv
+        if srv:
+            srv.serve_forever()
+
     except Exception as e:
         logger.error("WebAPI failed to start/bind: %r", e)
+
     finally:
+        with _web_lock:
+            srv = _web_srv
+            _web_srv = None
+
         try:
-            if _web_srv:
-                _web_srv.server_close()
+            if srv:
+                srv.server_close()
         except Exception:
             pass
-        _web_srv = None
