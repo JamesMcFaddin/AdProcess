@@ -35,6 +35,11 @@ VLC_ARGS: List[str] = [
     "--file-caching=3000",
 ]
 
+# ---- ffprobe validation retry policy ----
+FFPROBE_TIMEOUT_SECONDS = 10
+FFPROBE_MAX_ATTEMPTS = 10
+FFPROBE_RETRY_DELAY_SECONDS = 2
+
 def _vlc_path() -> str:
     # Prefer headless cvlc on Pi; fall back to vlc elsewhere.
     if IsRaspberryPI():
@@ -140,23 +145,14 @@ def StopPlayer() -> None:
         PlayerProcess = None
         VideoBeingPlayed = ""
 
-def _is_valid_mp4(path: Path) -> bool:
+def _run_ffprobe_once(ffprobe: str, path: Path) -> tuple[bool, str]:
     """
-    Validate that an MP4 is readable before handing it to VLC.
+    Run one ffprobe validation attempt.
 
-    This catches broken/truncated files such as:
-      - missing moov atom
-      - incomplete copy
-      - zero-byte / corrupt MP4 container
-
-    If ffprobe is not installed, return True and let VLC try.
+    Returns:
+      (True, "") if valid
+      (False, reason) if invalid, missing video stream, timed out, or failed
     """
-    ffprobe = "/usr/bin/ffprobe"
-
-    if not Path(ffprobe).exists():
-        logger.warning(f"{WARN}{VID} ffprobe not installed; skipping MP4 validation")
-        return True
-
     try:
         result = subprocess.run(
             [
@@ -174,28 +170,74 @@ def _is_valid_mp4(path: Path) -> bool:
             check=False,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=FFPROBE_TIMEOUT_SECONDS,
         )
 
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()
-            logger.error(f"{FAIL}{VID} Invalid MP4: {path.name}: {detail}")
-            return False
+            return False, detail or f"ffprobe rc={result.returncode}"
 
         output = (result.stdout or "").strip()
         if "video" not in output:
-            logger.error(f"{FAIL}{VID} MP4 has no video stream: {path.name}")
-            return False
+            return False, "no video stream"
 
-        return True
+        return True, ""
 
     except subprocess.TimeoutExpired:
-        logger.error(f"{FAIL}{VID} ffprobe timed out validating MP4: {path.name}")
-        return False
+        return False, f"ffprobe timed out after {FFPROBE_TIMEOUT_SECONDS}s"
 
     except Exception as e:
-        logger.error(f"{FAIL}{VID} MP4 validation failed: {path.name}: {e}")
-        return False
+        return False, str(e)
+
+def _is_valid_mp4(path: Path) -> bool:
+    """
+    Validate that an MP4 is readable before handing it to VLC.
+
+    This catches broken/truncated files such as:
+      - missing moov atom
+      - incomplete copy
+      - zero-byte / corrupt MP4 container
+
+    Boot-time I/O can make ffprobe occasionally time out on an otherwise
+    usable file, so validation is retried before declaring the file invalid.
+
+    If ffprobe is not installed, return True and let VLC try.
+    """
+    ffprobe = "/usr/bin/ffprobe"
+
+    if not Path(ffprobe).exists():
+        logger.warning(f"{WARN}{VID} ffprobe not installed; skipping MP4 validation")
+        return True
+
+    last_reason = ""
+
+    for attempt in range(1, FFPROBE_MAX_ATTEMPTS + 1):
+        ok, reason = _run_ffprobe_once(ffprobe, path)
+
+        if ok:
+            if attempt > 1:
+                logger.info(
+                    f"{DONE}{VID} ffprobe validated MP4 after "
+                    f"{attempt}/{FFPROBE_MAX_ATTEMPTS} attempts: {path.name}"
+                )
+            return True
+
+        last_reason = reason
+
+        if attempt < FFPROBE_MAX_ATTEMPTS:
+            logger.warning(
+                f"{WARN}{VID} ffprobe validation failed "
+                f"attempt {attempt}/{FFPROBE_MAX_ATTEMPTS} for {path.name}: {reason}; "
+                f"retrying in {FFPROBE_RETRY_DELAY_SECONDS}s"
+            )
+            time.sleep(FFPROBE_RETRY_DELAY_SECONDS)
+        else:
+            logger.error(
+                f"{FAIL}{VID} MP4 validation failed after "
+                f"{FFPROBE_MAX_ATTEMPTS} attempts: {path.name}: {last_reason}"
+            )
+
+    return False
 
 
 def PlayVideo(target: str) -> bool:
