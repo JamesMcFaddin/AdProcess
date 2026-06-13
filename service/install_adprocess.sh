@@ -201,7 +201,8 @@ if [[ $# -eq 3 || $# -eq 4 || $# -eq 5 ]]; then
   ADPROCESS_VERSION="$1"  # e.g., main, v1.85, or X
   SMB_USERNAME="$2"
   SMB_PASSWORD="$3"
-  TIMEZONE="${4:-KEEP}"
+  TIMEZONE="${4:-America/Chicago}"
+  [[ "$TIMEZONE" == "KEEP" ]] && TIMEZONE="America/Chicago"
   DEV_MODE="${5:-false}"
   log "Continuing Phase 2 with version=$ADPROCESS_VERSION, user=$SMB_USERNAME, timezone=$TIMEZONE, dev_mode=$DEV_MODE"
 else
@@ -324,39 +325,35 @@ else
   # Timezone Selection
   #
   # Purpose:
-  #   Optionally correct the Raspberry Pi timezone during
-  #   installation.
+  #   Set the Raspberry Pi timezone during installation.
   #
   # Default behavior:
-  #   Enter -> Leave existing timezone unchanged
+  #   Enter -> Central (America/Chicago)
   #
   # Notes:
-  #   This is useful when the SD card was flashed with the
-  #   wrong timezone. The selected value is applied later
-  #   in Phase 2 using timedatectl when available.
+  #   Most deployments are expected to use Central time,
+  #   so Enter follows the normal install path.
   #--------------------------------------------------
   while true; do
     echo
     echo "Timezone:"
-    echo "  Enter) Leave current timezone unchanged"
-    echo "  1) Central  (America/Chicago)"
-    echo "  2) Eastern  (America/New_York)"
-    echo "  3) Mountain (America/Denver)"
-    echo "  4) Pacific  (America/Los_Angeles)"
-    echo "  5) Arizona  (America/Phoenix)"
-    echo "  6) UTC"
+    echo "  Enter) Central  (America/Chicago)"
+    echo "  1) Eastern      (America/New_York)"
+    echo "  2) Mountain     (America/Denver)"
+    echo "  3) Pacific      (America/Los_Angeles)"
+    echo "  4) Arizona      (America/Phoenix)"
+    echo "  5) UTC"
     echo
 
-    read -rp "Choice [Enter=keep current]: " TZ_CHOICE
+    read -rp "Choice [Enter=Central]: " TZ_CHOICE
 
     case "$TZ_CHOICE" in
-      "") TIMEZONE="KEEP"; break ;;
-      1)  TIMEZONE="America/Chicago"; break ;;
-      2)  TIMEZONE="America/New_York"; break ;;
-      3)  TIMEZONE="America/Denver"; break ;;
-      4)  TIMEZONE="America/Los_Angeles"; break ;;
-      5)  TIMEZONE="America/Phoenix"; break ;;
-      6)  TIMEZONE="UTC"; break ;;
+      "") TIMEZONE="America/Chicago"; break ;;
+      1)  TIMEZONE="America/New_York"; break ;;
+      2)  TIMEZONE="America/Denver"; break ;;
+      3)  TIMEZONE="America/Los_Angeles"; break ;;
+      4)  TIMEZONE="America/Phoenix"; break ;;
+      5)  TIMEZONE="UTC"; break ;;
       *)  echo "Invalid selection." ;;
     esac
   done
@@ -479,35 +476,26 @@ else
 fi
 
 #--------------------------------------------------
-# Timezone Selection
+# Timezone and NTP Configuration
 #
-# Default behavior:
-#   Enter  -> Leave existing timezone unchanged
+# Purpose:
+#   Apply the timezone selected in Phase 1 and enable
+#   network time synchronization.
 #
-# Common deployment zones:
-#   1 -> Central  (America/Chicago)
-#   2 -> Eastern  (America/New_York)
-#   3 -> Mountain (America/Denver)
-#   4 -> Pacific  (America/Los_Angeles)
-#   5 -> Arizona  (America/Phoenix)
-#   6 -> UTC
+# Default:
+#   Enter in Phase 1 selects Central time:
+#       America/Chicago
 #
-# The selected timezone is passed into Phase 2 where
-# timedatectl updates the system configuration.
-#
-# Re-running the installer is safe. Selecting Enter
-# leaves the current timezone unchanged.
+# Notes:
+#   Re-running the installer safely re-applies the
+#   selected timezone.
 #--------------------------------------------------
 log "Configuring timezone and NTP..."
 
 if command -v timedatectl >/dev/null 2>&1; then
-  if [[ "$TIMEZONE" != "KEEP" ]]; then
-    log "Setting timezone to $TIMEZONE"
-    sudo timedatectl set-timezone "$TIMEZONE" || \
-      log "Warning: failed to set timezone"
-  else
-    log "Leaving existing timezone unchanged."
-  fi
+  log "Setting timezone to $TIMEZONE"
+  sudo timedatectl set-timezone "$TIMEZONE" || \
+    log "Warning: failed to set timezone"
 
   log "Enabling NTP time synchronization..."
   sudo timedatectl set-ntp true || \
@@ -518,11 +506,7 @@ else
     sudo systemctl enable ntp || true
     sudo systemctl start ntp || true
 
-    if [[ "$TIMEZONE" != "KEEP" ]]; then
-      log "Warning: timedatectl not present; could not automatically set timezone to $TIMEZONE."
-    else
-      log "timedatectl not present; leaving timezone unchanged."
-    fi
+    log "Warning: timedatectl not present; could not automatically set timezone to $TIMEZONE."
   else
     log "Lite mode: timedatectl not present; skipping ntp package install."
   fi
