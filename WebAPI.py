@@ -36,10 +36,11 @@ _web_srv: Optional[ThreadingHTTPServer] = None
 _web_thread: Optional[threading.Thread] = None
 _monitor_thread: Optional[threading.Thread] = None
 _web_lock = threading.RLock()
+_last_officedesktop_ip: Optional[str] = None
 
 OFFICEDESKTOP_CHECK_SECONDS = 60
 OFFICEDESKTOP_CONNECT_TIMEOUT_SECONDS = 5
-OFFICEDESKTOP_HOST = "OfficeDesktop"
+OFFICEDESKTOP_NAME = "OfficeDesktop"
 OFFICEDESKTOP_PORT = 445
 
 class _ReusableThreadingHTTPServer(ThreadingHTTPServer):
@@ -595,19 +596,45 @@ class Handler(BaseHTTPRequestHandler):
 # OfficeDesktop reachability monitor / WebAPI self-heal
 # -----------------------------------------------------------------------------
 
+def _resolve_officedesktop_ip() -> str:
+    """
+    Resolve OfficeDesktop while it is reachable and cache the IP in memory.
+
+    After OfficeDesktop disappears, name resolution can block or fail before
+    socket timeout applies. Using the last known IP avoids getting stuck in
+    DNS/NetBIOS lookup while this AdProcess run is alive.
+    """
+    global _last_officedesktop_ip
+
+    try:
+        ip = socket.gethostbyname(OFFICEDESKTOP_NAME)
+        if ip:
+            if _last_officedesktop_ip != ip:
+                logger.info("OfficeDesktop resolved: %s -> %s", OFFICEDESKTOP_NAME, ip)
+            _last_officedesktop_ip = ip
+            return ip
+
+    except Exception as e:
+        logger.debug("OfficeDesktop name resolution failed: %r", e)
+
+    if _last_officedesktop_ip:
+        return _last_officedesktop_ip
+
+    return OFFICEDESKTOP_NAME
+
+
 def _officedesktop_reachable(
-    host: str = OFFICEDESKTOP_HOST,
     port: int = OFFICEDESKTOP_PORT,
     timeout_seconds: int = OFFICEDESKTOP_CONNECT_TIMEOUT_SECONDS,
 ) -> bool:
     """
     Check whether OfficeDesktop is reachable from this Pi.
 
-    This detects the real-world condition where OfficeDesktop leaves TvLand
-    and later returns. When OfficeDesktop becomes reachable again, the WebAPI
-    listener is restarted so clients can reconnect without rebooting the Pi
-    or restarting the full AdProcess system.
+    Uses the last known IP once available so the monitor does not get stuck
+    trying to resolve OfficeDesktop after it disappears from TvLand.
     """
+    host = _resolve_officedesktop_ip()
+
     try:
         with socket.create_connection((host, port), timeout=timeout_seconds):
             return True
@@ -683,10 +710,16 @@ def _webapi_monitor_loop() -> None:
         try:
             reachable = _officedesktop_reachable()
 
+            logger.debug(
+                "OfficeDesktop monitor cycle host=%s reachable=%s",
+                _resolve_officedesktop_ip(),
+                reachable,
+            )
+
             if last_reachable is None:
                 logger.info(
                     "OfficeDesktop monitor started: %s:%s reachable=%s",
-                    OFFICEDESKTOP_HOST,
+                    _resolve_officedesktop_ip(),
                     OFFICEDESKTOP_PORT,
                     reachable,
                 )
