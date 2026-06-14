@@ -12,6 +12,7 @@ import shutil
 import contextlib
 import logging
 import time
+import socket
 from typing import Dict, List, Any, cast
 
 import AdConfig as cfg
@@ -22,6 +23,14 @@ from AdShutdown import ShutdownRequested
 logger = logging.getLogger(__name__)
 
 
+def OfficeDesktopReachable(timeout_seconds: float = 3.0) -> bool:
+    try:
+        with socket.create_connection(("OfficeDesktop", 445), timeout=timeout_seconds):
+            return True
+    except Exception as e:
+        logger.warning(f"OfficeDesktop not reachable; skipping sync: {e}")
+        return False
+    
 ###############
 def _iter_playlist_videos(local_playlist_path: Path) -> List[str]:
     try:
@@ -65,6 +74,10 @@ def _video_needs_sync(src: Path, dst: Path) -> bool:
 def SyncFiles() -> str:
     logger.debug(f"{START} ********** Sync start **********")
 
+    if not OfficeDesktopReachable():
+        logger.warning("Cloud sync skipped because OfficeDesktop is not reachable.")
+        return ""
+    
     local_playlist = Path(cfg.LOCAL_CONFIGS) / "PlayList.json"
     video_names = _iter_playlist_videos(local_playlist)
 

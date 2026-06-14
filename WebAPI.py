@@ -708,7 +708,11 @@ def _webapi_monitor_loop() -> None:
 
     while True:
         try:
+            logger.debug("OfficeDesktop monitor tick BEFORE reachability")
+
             reachable = _officedesktop_reachable()
+
+            logger.debug("OfficeDesktop monitor tick AFTER reachability")
 
             logger.debug(
                 "OfficeDesktop monitor cycle host=%s reachable=%s",
