@@ -23,13 +23,38 @@ from AdShutdown import ShutdownRequested
 logger = logging.getLogger(__name__)
 
 
+_last_reachable: bool | None = None
+
+
 def OfficeDesktopReachable(timeout_seconds: float = 3.0) -> bool:
+    global _last_reachable
+
+    reachable = False
+    reason = ""
+
     try:
-        with socket.create_connection(("OfficeDesktop", 445), timeout=timeout_seconds):
-            return True
+        with socket.create_connection(
+            ("OfficeDesktop", 445),
+            timeout=timeout_seconds,
+        ):
+            reachable = True
+
     except Exception as e:
-        logger.warning(f"OfficeDesktop not reachable; skipping sync: {e}")
-        return False
+        reason = str(e)
+
+    if reachable != _last_reachable:
+
+        if reachable:
+            logger.info("OfficeDesktop is reachable again.")
+
+        else:
+            logger.warning(
+                f"OfficeDesktop is no longer reachable: {reason}"
+            )
+
+        _last_reachable = reachable
+
+    return reachable
     
 ###############
 def _iter_playlist_videos(local_playlist_path: Path) -> List[str]:
@@ -75,7 +100,6 @@ def SyncFiles() -> str:
     logger.debug(f"{START} ********** Sync start **********")
 
     if not OfficeDesktopReachable():
-        logger.warning("Cloud sync skipped because OfficeDesktop is not reachable.")
         return ""
     
     local_playlist = Path(cfg.LOCAL_CONFIGS) / "PlayList.json"

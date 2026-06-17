@@ -26,7 +26,7 @@ from AdConfigTypes import DayHours
 
 from SyncFiles import SyncFiles
 from Player import StopPlayer
-from PlayList import NormalizeTime, ProcessPlayList, NormalizeDay
+from PlayList import NormalizeTime, ProcessPlayList
 
 import logging
 from AdLogging import *
