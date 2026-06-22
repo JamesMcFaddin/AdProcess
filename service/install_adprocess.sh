@@ -607,6 +607,12 @@ sudo systemctl restart systemd-journald || true
 #       Persistent storage for archived logs,
 #       diagnostics, and support files.
 #
+#   ~/PFlags
+#       Persistent flags that survive reboot, such as:
+#           debug-all
+#           debug-AdProcess
+#           debug-PiWatchdog
+#
 #   ~/AdProcess/config
 #       Local AdProcess configuration files.
 #
@@ -619,7 +625,9 @@ sudo systemctl restart systemd-journald || true
 log "Creating base directories..."
 mkdir -p "$HOME/Cloud"
 mkdir -p "$HOME/Archive"
+mkdir -p "$HOME/PFlags"
 mkdir -p "$HOME/AdProcess/config" || true
+log "Persistent flags directory ready: $HOME/PFlags"
 
 #--------------------------------------------------
 # Deployment Copy Cleanup and Sanity Checks
