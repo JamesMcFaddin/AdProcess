@@ -166,7 +166,10 @@ RUNTIME_DIR: Path = RAM_BASE / "AdProcess"
 RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 
 FLAGS_DIR: Path = RUNTIME_DIR / "Flags"
+FLAGS_DIR.mkdir(parents=True, exist_ok=True)
+
 PFLAGS_DIR: Path = HOME_DIR / "PFlags"
+PFLAGS_DIR.mkdir(parents=True, exist_ok=True)
 
 HEARTBEAT_FILE: Path = FLAGS_DIR / "AdProcess.mon"
 QUIT_FLAG: Path = FLAGS_DIR / "quit-AdProcess"
