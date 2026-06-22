@@ -166,11 +166,11 @@ RUNTIME_DIR: Path = RAM_BASE / "AdProcess"
 RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 
 FLAGS_DIR: Path = RUNTIME_DIR / "Flags"
-FLAGS_DIR.mkdir(parents=True, exist_ok=True)
+PFLAGS_DIR: Path = HOME_DIR / "PFlags"
 
 HEARTBEAT_FILE: Path = FLAGS_DIR / "AdProcess.mon"
 QUIT_FLAG: Path = FLAGS_DIR / "quit-AdProcess"
-DEBUG_FLAG: Path = FLAGS_DIR / "debug-AdProcess"
+DEBUG_FLAG: Path = PFLAGS_DIR / "debug-AdProcess"
 
 # PiNotify-owned mailbox directories (RAM-backed)
 INBOX_DIR      = RUNTIME_DIR / "Inbox"

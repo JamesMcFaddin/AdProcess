@@ -112,6 +112,64 @@ request_components_stop() {
   return 0
 }
 
+
+repair_package_manager() {
+  log "Checking package manager state..."
+
+  export DEBIAN_FRONTEND=noninteractive
+
+  log "Running: sudo dpkg --configure -a"
+  if ! sudo dpkg --configure -a; then
+    log "ERROR: dpkg repair failed. Package manager is not in a safe state."
+    exit 1
+  fi
+  log "dpkg configure completed"
+
+  log "Running: sudo apt-get -f install -y"
+  if ! sudo apt-get -f install -y \
+      -o Dpkg::Options::="--force-confdef" \
+      -o Dpkg::Options::="--force-confold" \
+      -o DPkg::Lock::Timeout=120; then
+    log "ERROR: apt dependency repair failed. Package manager is not in a safe state."
+    exit 1
+  fi
+  log "apt dependency repair completed"
+}
+
+apt_update_only() {
+  log "Updating package lists only..."
+
+  export DEBIAN_FRONTEND=noninteractive
+
+  if ! sudo apt-get update -o DPkg::Lock::Timeout=120; then
+    log "ERROR: apt update failed."
+    exit 1
+  fi
+}
+
+apt_install_required_packages() {
+  log "Installing required packages only. General OS upgrade is intentionally skipped."
+
+  export DEBIAN_FRONTEND=noninteractive
+
+  if ! sudo apt-get install -y \
+      -o Dpkg::Options::="--force-confdef" \
+      -o Dpkg::Options::="--force-confold" \
+      -o DPkg::Lock::Timeout=120 \
+      samba samba-common-bin \
+      smbclient \
+      cifs-utils \
+      git \
+      python3 \
+      python3-pip \
+      feh \
+      vlc \
+      ffmpeg; then
+    log "ERROR: required package install failed."
+    exit 1
+  fi
+}
+
 #--------------------------------------------------
 # Guardrails
 #--------------------------------------------------
@@ -441,38 +499,28 @@ log "Phase 2 starting (mode: $([[ "$NORMAL_MODE" == true ]] && echo normal || ec
 # System Update and Required Packages
 #
 # Purpose:
-#   Bring the Raspberry Pi OS package set current and
-#   install the packages required by AdProcess and its
-#   support tooling.
+#   Repair interrupted package operations, refresh package
+#   lists, and install only the packages required by
+#   AdProcess and its support tooling.
 #
 # Installed packages:
 #   samba, samba-common-bin, smbclient, cifs-utils,
 #   git, python3, python3-pip, feh, vlc, ffmpeg.
 #
 # Notes:
-#   Normal mode performs update/upgrade/install.
+#   Normal mode intentionally does NOT perform a general
+#   apt upgrade/full-upgrade. Field installs should not
+#   pull unrelated package updates while deploying AdProcess.
+#
 #   Lite mode skips package changes.
 #--------------------------------------------------
 if [[ "$NORMAL_MODE" == true ]]; then
-  log "Updating system..."
-  sudo apt update
-  sudo apt full-upgrade -y
-  sudo apt autoremove --purge -y
-  sudo apt autoclean -y || true
-
-  log "Installing required packages (samba, cifs-utils, smbclient, git, python3, feh, vlc, ffmpeg)..."
-  sudo apt install -y \
-    samba samba-common-bin \
-    smbclient \
-    cifs-utils \
-    git \
-    python3 \
-    python3-pip \
-    feh \
-    vlc \
-    ffmpeg
+  repair_package_manager
+  apt_update_only
+  apt_install_required_packages
+  sudo apt-get autoclean -y || true
 else
-  log "Lite mode: skipping apt update/upgrade and package installs."
+  log "Lite mode: skipping apt update and package installs."
 fi
 
 #--------------------------------------------------
