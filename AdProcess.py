@@ -10,6 +10,7 @@ import os
 import subprocess
 import datetime
 import contextlib
+import time
 
 from pathlib import Path
 from typing import Optional, cast
@@ -45,6 +46,33 @@ def LaunchWebServer():
     t.start()
     return t
 
+def WaitForDisplay(timeout_seconds: float = 20.0) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+
+    while time.monotonic() < deadline:
+        try:
+            proc = subprocess.run(
+                ["wlr-randr"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+
+            if proc.returncode == 0 and "HDMI-A-1" in proc.stdout:
+                logger.info("Display ready: HDMI-A-1 found")
+                return True
+
+            logger.debug("Display not ready yet: %s", proc.stderr.strip())
+
+        except Exception as e:
+            logger.debug("Display readiness check failed: %s", e)
+
+        time.sleep(1)
+
+    logger.warning("Display not ready after %.1f seconds", timeout_seconds)
+    return False
+    
 #///////////////////////////////////////////////////////////////////////////////
 #
 class AdProcessor:
@@ -191,7 +219,7 @@ class AdProcessor:
                 logger.info("Heartbeat removed: %s", HEARTBEAT_FILE)
         except Exception as e:
             logger.warning("Failed to remove heartbeat %s: %s", HEARTBEAT_FILE, e)
-
+    
     #///////////////////////////////////////////////////////////////////////////
     # Turn HDMI display on or off, if not debugging, on Raspberry Pi.
     def turn_display(self, on: bool):
@@ -221,7 +249,12 @@ class AdProcessor:
         signal.signal(signal.SIGTERM, _on_signal)
         signal.signal(signal.SIGINT, _on_signal)
 
-        # No startup wait. Start heartbeat/main loop immediately.
+        # Let PiWatchdog know AdProcess restarted immediately.
+        self.touch_heartbeat()
+
+        # Replace blind startup sleep with display readiness polling.
+        WaitForDisplay()
+
         wake_time = 0
         self.turn_display(True)
 
