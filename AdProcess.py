@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import subprocess
 import datetime
+import contextlib
 
 from pathlib import Path
 from typing import Optional, cast
@@ -34,6 +35,10 @@ logger = logging.getLogger(__name__)
 
 from threading import Thread
 from WebAPI import StartWebApiServer, StopWebApiServer
+
+def remove_heartbeat_file() -> None:
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(HEARTBEAT_FILE)
 
 def LaunchWebServer():
     t = Thread(target=StartWebApiServer, daemon=True)
@@ -210,35 +215,29 @@ class AdProcessor:
         _shutdown = threading.Event()
 
         def _on_signal(_signum: int, _frame: Optional[FrameType]) -> None:
-            # Explicitly mark as intentionally unused (silences strict linters)
             del _signum, _frame
             _shutdown.set()
 
         signal.signal(signal.SIGTERM, _on_signal)
         signal.signal(signal.SIGINT, _on_signal)
 
-        # Replace sleep(10) with interruptible wait
-        _shutdown.wait(timeout=10.0)
-
+        # No startup wait. Start heartbeat/main loop immediately.
         wake_time = 0
         self.turn_display(True)
 
         while not _shutdown.is_set():
-            # See if the logging level changed
             CheckLogLevel()
             self.touch_heartbeat()
 
-            # External quit triggered
             if self.quit_process():
                 StopPlayer()
                 self.turn_display(True)
                 StopWebApiServer()
 
-                ShutdownAndArchive()   # archive + stop logging
-                os.remove(HEARTBEAT_FILE)
+                ShutdownAndArchive()
+                remove_heartbeat_file()
                 sys.exit(0)
 
-            # 💤 Are we closed right now?
             if wake_time == 0 and not self.is_open():
                 logger.info("Closed. Going to sleep until we open...")
                 StopPlayer()
@@ -255,7 +254,7 @@ class AdProcessor:
                     SyncFiles()
                     StopWebApiServer()
                     ShutdownAndArchive()
-                    os.remove(HEARTBEAT_FILE)
+                    remove_heartbeat_file()
                     self.reboot_system()
                     sys.exit(0)
             else:
@@ -268,11 +267,10 @@ class AdProcessor:
             FlushLogs()
             _shutdown.wait(timeout=float(self.CHECK_INTERVAL))
 
-        # Graceful shutdown when SIGTERM/SIGINT is received
         logger.info(f"{DONE} Graceful shutdown")
         StopWebApiServer()
-        ShutdownAndArchive()      # drain queue → RAM file
-        os.remove(HEARTBEAT_FILE)
+        ShutdownAndArchive()
+        remove_heartbeat_file()
         sys.exit(0)
 
 
