@@ -250,7 +250,8 @@ class AdProcessor:
         time.sleep(10.0)
 
         def _on_signal(_signum: int, _frame: Optional[FrameType]) -> None:
-            del _signum, _frame
+            logger.warning("Signal received: %s", _signum)
+            del _frame
             _shutdown.set()
 
         signal.signal(signal.SIGTERM, _on_signal)
