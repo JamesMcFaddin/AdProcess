@@ -243,11 +243,7 @@ class AdProcessor:
         _shutdown = threading.Event()
 
         # Touch heartbeat immediately so PiWatchdog sees us.
-        self.touch_heartbeat()
-
-        # Give labwc/Wayland/VLC fullscreen path time to settle.
-        # No signal handler installed yet, so stale TERM from restart cannot set _shutdown.
-        time.sleep(10.0)
+        #self.touch_heartbeat()
 
         def _on_signal(_signum: int, _frame: Optional[FrameType]) -> None:
             logger.warning("Signal received: %s", _signum)
@@ -257,6 +253,10 @@ class AdProcessor:
         signal.signal(signal.SIGTERM, _on_signal)
         signal.signal(signal.SIGINT, _on_signal)
 
+        # Give labwc/Wayland/VLC fullscreen path time to settle.
+        # No signal handler installed yet, so stale TERM from restart cannot set _shutdown.
+        _shutdown.wait(timeout=10.0)
+    
         wake_time = 0
         self.turn_display(True)
 
