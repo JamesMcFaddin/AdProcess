@@ -252,8 +252,9 @@ class AdProcessor:
         # Let PiWatchdog know AdProcess restarted immediately.
         self.touch_heartbeat()
 
-        # Replace blind startup sleep with display readiness polling.
-        WaitForDisplay()
+        # Give labwc/Wayland/VLC fullscreen path time to settle.
+        # This is intentionally a startup settle delay, not a display-detection test.
+        time.sleep(10.0)
 
         wake_time = 0
         self.turn_display(True)
