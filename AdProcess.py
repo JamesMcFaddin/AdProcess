@@ -242,19 +242,19 @@ class AdProcessor:
     def run(self):
         _shutdown = threading.Event()
 
+        # Touch heartbeat immediately so PiWatchdog sees us.
+        self.touch_heartbeat()
+
+        # Give labwc/Wayland/VLC fullscreen path time to settle.
+        # No signal handler installed yet, so stale TERM from restart cannot set _shutdown.
+        time.sleep(10.0)
+
         def _on_signal(_signum: int, _frame: Optional[FrameType]) -> None:
             del _signum, _frame
             _shutdown.set()
 
         signal.signal(signal.SIGTERM, _on_signal)
         signal.signal(signal.SIGINT, _on_signal)
-
-        # Let PiWatchdog know AdProcess restarted immediately.
-        self.touch_heartbeat()
-
-        # Give labwc/Wayland/VLC fullscreen path time to settle.
-        # This is intentionally a startup settle delay, not a display-detection test.
-        time.sleep(10.0)
 
         wake_time = 0
         self.turn_display(True)
