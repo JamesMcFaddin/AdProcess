@@ -25,22 +25,41 @@ logger = logging.getLogger(__name__)
 
 _last_reachable: bool | None = None
 
-
 def OfficeDesktopReachable(timeout_seconds: float = 3.0) -> bool:
     global _last_reachable
 
     reachable = False
     reason = ""
 
-    try:
-        with socket.create_connection(
-            ("OfficeDesktop", 445),
-            timeout=timeout_seconds,
-        ):
-            reachable = True
+    for attempt in range(2):
+        try:
+            with socket.create_connection(
+                ("OfficeDesktop", 445),
+                timeout=timeout_seconds,
+            ):
+                reachable = True
 
-    except Exception as e:
-        reason = str(e)
+                if attempt > 0:
+                    logger.debug(
+                        "OfficeDesktop reachability recovered on retry."
+                    )
+
+                break
+
+        except Exception as e:
+            reason = str(e)
+
+            logger.debug(
+                "OfficeDesktop reachability attempt %d/2 failed: %s",
+                attempt + 1,
+                reason,
+            )
+
+            if attempt == 0:
+                logger.debug(
+                    "Retrying OfficeDesktop reachability in 2 seconds..."
+                )
+                time.sleep(2)
 
     if reachable != _last_reachable:
 
