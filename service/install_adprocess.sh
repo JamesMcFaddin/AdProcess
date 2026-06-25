@@ -820,40 +820,73 @@ fi
 # LabWC Autostart Configuration
 #
 # Purpose:
-#   Launch AdProcess automatically when the Pi desktop
-#   session starts.
+#   Start the AdProcess desktop-session components
+#   when the Pi graphical desktop session starts.
+#
+# Components started:
+#   AdLauncher
+#       Runs inside the labwc desktop session and handles
+#       runtime *.launch requests from:
+#
+#           /dev/shm/AdProcess/Flags
+#
+#       This allows AdWatchdog/PiWatchdog to request
+#       AdProcess restarts without launching GUI processes
+#       from a systemd timer/session.
+#
+#   AdProcess
+#       Main signage application.
+#
+# Architecture:
+#   Normal boot:
+#       labwc -> AdLauncher
+#       labwc -> AdProcess
+#
+#   Runtime recovery:
+#       PiWatchdog writes AdProcess.launch
+#       AdLauncher launches AdProcess inside the desktop session.
 #
 # Target:
 #   ~/.config/labwc/autostart
 #
 # Notes:
 #   Normal mode only.
-#   Duplicate AdProcess.py entries are prevented.
+#   Duplicate/stale launcher entries are removed before
+#   the current AdProcess system autostart block is added.
 #--------------------------------------------------
 if [[ "$NORMAL_MODE" == true ]]; then
-  log "Configuring LabWC autostart for AdProcess..."
+  log "Configuring LabWC autostart for AdProcess system..."
 
   AUTOSTART_FILE="$HOME/.config/labwc/autostart"
-  AUTOSTART_CMD="exec /usr/bin/python3 $HOME/AdProcess/AdProcess.py &"
-  AUTOSTART_MARKER="# AdProcess autostart"
+  AUTOSTART_MARKER="# AdProcess system autostart"
+
+  ADLAUNCHER_CMD="exec /usr/bin/python3 $HOME/AdProcess/AdLauncher/AdLauncher.py &"
+  ADPROCESS_CMD="exec /usr/bin/python3 $HOME/AdProcess/AdProcess.py &"
 
   mkdir -p "$(dirname "$AUTOSTART_FILE")"
   touch "$AUTOSTART_FILE"
 
-  # Remove any previous AdProcess autostart lines, including old paths
-  # or commented/stale entries that would make a simple grep unreliable.
+  # Remove previous AdProcess system autostart entries,
+  # including older direct-only AdProcess starts and any
+  # earlier AdLauncher attempts.
   sed -i '/AdProcess\.py/d' "$AUTOSTART_FILE"
+  sed -i '/AdLauncher\.py/d' "$AUTOSTART_FILE"
   sed -i '/# AdProcess autostart/d' "$AUTOSTART_FILE"
+  sed -i '/# AdLauncher autostart/d' "$AUTOSTART_FILE"
+  sed -i '/# AdProcess system autostart/d' "$AUTOSTART_FILE"
 
   {
     echo ""
     echo "$AUTOSTART_MARKER"
-    echo "$AUTOSTART_CMD"
+    echo "$ADLAUNCHER_CMD"
+    echo "$ADPROCESS_CMD"
   } >> "$AUTOSTART_FILE"
 
   chmod +x "$AUTOSTART_FILE" || true
 
-  log "LabWC autostart configured: $AUTOSTART_CMD"
+  log "LabWC autostart configured:"
+  log "  $ADLAUNCHER_CMD"
+  log "  $ADPROCESS_CMD"
 else
   log "Lite mode: leaving autostart unchanged."
 fi
