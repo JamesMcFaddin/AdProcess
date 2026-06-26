@@ -327,9 +327,6 @@ class AdProcessor:
     def run(self):
         _shutdown = threading.Event()
 
-        # Touch heartbeat immediately so PiWatchdog sees us.
-        #self.touch_heartbeat()
-
         def _on_signal(_signum: int, _frame: Optional[FrameType]) -> None:
             logger.warning("Signal received: %s", _signum)
             del _frame
@@ -344,6 +341,9 @@ class AdProcessor:
     
         wake_time = 0
         self.turn_display(True)
+
+        # Create the heartbeat so PiWatchdog sees us.
+        CreateMonFile()
 
         while not _shutdown.is_set():
             CheckLogLevel()
