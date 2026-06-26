@@ -11,9 +11,10 @@ import subprocess
 import datetime
 import contextlib
 import time
+import json
 
 from pathlib import Path
-from typing import Optional, cast
+from typing import Any, Optional, cast
 from types import FrameType
 
 import sys, threading, signal
@@ -22,7 +23,7 @@ if _tracer is not None:
     threading.settrace(_tracer)
 
 import AdConfig as cfg
-from AdConfig import IsRaspberryPI, SCRIPT_DIR, HEARTBEAT_FILE
+from AdConfig import IsRaspberryPI, HOME_DIR, FLAGS_DIR, SCRIPT_DIR, HEARTBEAT_FILE
 from AdConfig import CONFIG, PLAY_LIST, LOCAL_VIDEOS
 from AdConfigTypes import DayHours
 
@@ -72,7 +73,91 @@ def WaitForDisplay(timeout_seconds: float = 20.0) -> bool:
 
     logger.warning("Display not ready after %.1f seconds", timeout_seconds)
     return False
-    
+
+#////////////////////////////////////////////////////////////////////////////
+#
+def CreateMonFile() -> bool:
+    """
+    Create (or recreate) the PiWatchdog monitor file.
+
+    The monitor file serves two purposes:
+
+      1) Its modification time is the heartbeat.
+      2) Its JSON contents describe how PiWatchdog should stop,
+         restart and manage this process if recovery is required.
+
+    After this function succeeds, the application should periodically
+    touch the file rather than rewriting it.
+    """
+    try:
+        FLAGS_DIR.mkdir(parents=True, exist_ok=True)
+
+        mon: dict[str, Any] = {
+
+            "schema_version": 1,
+
+            "name": "AdProcess",
+
+            "stop": {
+
+                "term": [
+                    "AdProcess.py",
+                    "vlc",
+                    "cvlc",
+                ],
+
+                "kill": [
+                    "AdProcess.py",
+                    "vlc",
+                    "cvlc",
+                ],
+
+                "term_wait_seconds": 10,
+            },
+
+            "start": {
+
+                "launch_file": "AdProcess.launch",
+
+                "command": [
+                    "/usr/bin/python3",
+                    str(SCRIPT_DIR / "AdProcess.py"),
+                ],
+
+                "cwd": str(HOME_DIR),
+
+                "detach": True,
+            },
+
+            "policy": {
+
+                "stale_again": "reboot",
+
+                "clear_restart_after_seconds": 10 * 60,
+            },
+        }
+
+        tmp = HEARTBEAT_FILE.with_suffix(".tmp")
+
+        tmp.write_text(
+            json.dumps(
+                mon,
+                indent=4,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+
+        tmp.replace(HEARTBEAT_FILE)
+
+        logger.debug(f"Created monitor file: {HEARTBEAT_FILE}")
+
+        return True
+
+    except Exception as e:
+        logger.warning(f"Failed to create monitor file '{HEARTBEAT_FILE}': {e}")
+        return False
+
 #///////////////////////////////////////////////////////////////////////////////
 #
 class AdProcessor:
