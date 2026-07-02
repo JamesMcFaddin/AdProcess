@@ -70,14 +70,13 @@ HOME_DIR: Path = ADPROCESS_DIR.parent
 RAM_BASE: Path = _get_ram_base()
 RUNTIME_DIR: Path = RAM_BASE / "AdProcess"
 FLAGS_DIR: Path = RUNTIME_DIR / "Flags"
-
 PFLAGS_DIR: Path = HOME_DIR / "PFlags"
 
 LOG_FILE: Path = RUNTIME_DIR / "AdLauncher.log"
 MON_FILE: Path = FLAGS_DIR / "AdLauncher.mon"
 
-DEBUG_FLAG: Path = FLAGS_DIR / "debug-AdLauncher"
-PDEBUG_FLAG: Path = PFLAGS_DIR / "debug-AdLauncher"
+QUIT_FLAG: Path = FLAGS_DIR / "quit-AdLauncher"
+DEBUG_FLAG: Path = PFLAGS_DIR / "debug-AdLauncher"
 PDEBUG_ALL_FLAG: Path = PFLAGS_DIR / "debug-all"
 
 LAUNCH_SUFFIX = ".launch"
@@ -93,7 +92,6 @@ POLL_SECONDS = 1.0
 def debug_enabled() -> bool:
     return (
         DEBUG_FLAG.exists()
-        or PDEBUG_FLAG.exists()
         or PDEBUG_ALL_FLAG.exists()
     )
 
@@ -382,6 +380,9 @@ def process_launch_files() -> None:
         process_launch_file(launch_file)
 
 
+def quit_requested() -> bool:
+    return QUIT_FLAG.exists()
+
 # -----------------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------------
@@ -404,6 +405,12 @@ def main() -> int:
     )
 
     while not shutdown:
+        if quit_requested():
+            log_warning("quit-AdLauncher flag detected")
+            shutdown = True
+            break
+
+
         touch_heartbeat()
         process_launch_files()
         time.sleep(POLL_SECONDS)
