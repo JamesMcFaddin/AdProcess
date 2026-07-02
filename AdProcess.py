@@ -138,6 +138,7 @@ def CreateMonFile() -> bool:
         }
 
         tmp = HEARTBEAT_FILE.with_suffix(".tmp")
+        logger.debug(f"Creating temporary monitor file: {tmp}")
 
         tmp.write_text(
             json.dumps(
@@ -149,7 +150,6 @@ def CreateMonFile() -> bool:
         )
 
         tmp.replace(HEARTBEAT_FILE)
-
         logger.debug(f"Created monitor file: {HEARTBEAT_FILE}")
 
         return True
