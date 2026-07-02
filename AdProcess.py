@@ -112,7 +112,7 @@ def CreateMonFile() -> bool:
                     "cvlc",
                 ],
 
-                "term_wait_seconds": 10,
+                "term_wait_seconds": 30,
             },
 
             "start": {
