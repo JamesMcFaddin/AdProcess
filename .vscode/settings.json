@@ -2,7 +2,7 @@
     "git.requireGitUserConfig": false,
     "python.analysis.typeCheckingMode": "strict",
     "editor.fontSize": 14,
-    "window.zoomLevel": 0.25,
+    "window.zoomLevel": 1.0,
 
     // ── Spell Checker (Code Spell Checker) ───────────────────────────────
     "cSpell.enabled": true,

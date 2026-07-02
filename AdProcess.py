@@ -320,6 +320,7 @@ class AdProcessor:
         else:
             cmd: list[str]  = ["wlr-randr", "--output", output_name, "--off"]
 
+        logger.debug("Running command: %s", cmd)
         subprocess.run(cmd, check=True)
 
     #////////////////////////////////////////////////////////////////////////////

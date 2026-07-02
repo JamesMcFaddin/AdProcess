@@ -39,7 +39,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, cast
 from types import FrameType
 import contextlib
 import json
@@ -47,7 +47,6 @@ import os
 import signal
 import subprocess
 import time
-
 
 # -----------------------------------------------------------------------------
 # Path setup
@@ -186,24 +185,26 @@ def load_launch_json(path: Path) -> dict[str, Any] | None:
         quarantine_bad_file(path, "JSON root must be an object")
         return None
 
-    return obj
+    return cast(dict[str, Any], obj)
 
 
 def get_command(obj: dict[str, Any], path: Path) -> list[str] | None:
-    raw_command = obj.get("command")
+    value = obj.get("command")
 
-    if not isinstance(raw_command, list):
+    if not isinstance(value, list):
         quarantine_bad_file(path, "missing or invalid 'command' list")
         return None
 
+    raw_command = cast(list[object], value)
+
     command: list[str] = []
 
-    for part in raw_command:
-        if not isinstance(part, str) or not part:
-            quarantine_bad_file(path, "'command' must contain only non-empty strings")
+    for item in raw_command:
+        if not isinstance(item, str):
+            quarantine_bad_file(path, "command contains non-string value")
             return None
 
-        command.append(part)
+        command.append(item)
 
     if not command:
         quarantine_bad_file(path, "'command' cannot be empty")
