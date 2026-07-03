@@ -307,7 +307,7 @@ class AdProcessor:
     
     #///////////////////////////////////////////////////////////////////////////
     # Turn HDMI display on or off, if not debugging, on Raspberry Pi.
-    def turn_display(self, on: bool):
+    def turn_display(self, on: bool) -> None:
         logger.debug(f"turning the display {'on' if on else 'off'}")
 
         if (not IsRaspberryPI()) or (sys.gettrace() is not None):
@@ -318,10 +318,36 @@ class AdProcessor:
         if on:
             cmd: list[str] = ["wlr-randr", "--output", output_name, "--on"]
         else:
-            cmd: list[str]  = ["wlr-randr", "--output", output_name, "--off"]
+            cmd: list[str] = ["wlr-randr", "--output", output_name, "--off"]
 
-        logger.debug("Running command: %s", cmd)
-        subprocess.run(cmd, check=True)
+        try:
+            logger.debug("Running command: %s", cmd)
+
+            proc = subprocess.run(
+                cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+
+            if proc.returncode != 0:
+                stderr = (proc.stderr or "").strip()
+                stdout = (proc.stdout or "").strip()
+                detail = stderr if stderr else stdout
+
+                logger.warning(
+                    "display command failed rc=%s: %s",
+                    proc.returncode,
+                    detail,
+                )
+
+        except subprocess.TimeoutExpired:
+            logger.warning("display command timed out: %s", cmd)
+
+        except Exception as e:
+            logger.warning("display command exception: %s", e)
+
 
     #////////////////////////////////////////////////////////////////////////////
     #
