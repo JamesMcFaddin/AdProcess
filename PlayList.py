@@ -39,14 +39,15 @@ def BusinessDayStartsMinutes() -> int:
     )
 
 
-def NormalizeDay(now: datetime.datetime) -> str:
+def NormalizeDay(now: datetime.datetime,
+                 threshold: int = BusinessDayStartsMinutes()) -> str:
     """
     Returns the OpenHours key ("Mon", "Tue", ...) for the business day.
 
     If the current time is before BusinessDayStarts, count it as
     part of the previous business day.
     """
-    if (now.hour * 60 + now.minute) < BusinessDayStartsMinutes():
+    if (now.hour * 60 + now.minute) < threshold:
         now = now - datetime.timedelta(days=1)
 
     return now.strftime("%a")

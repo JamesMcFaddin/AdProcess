@@ -29,7 +29,7 @@ from AdConfigTypes import DayHours
 
 from SyncFiles import SyncFiles
 from Player import StopPlayer
-from PlayList import NormalizeTime, ProcessPlayList
+from PlayList import NormalizeTime, NormalizeDay, ProcessPlayList
 
 import logging
 from AdLogging import *
@@ -163,6 +163,11 @@ def CreateMonFile() -> bool:
 class AdProcessor:
     open_minutes: int = 0
     close_minutes: int = 0
+
+    reboot_minutes: int = 0
+    business_day: str = ""
+    reboot_day: str = ""
+
     day: str = ""
 
     CHECK_INTERVAL = 30
@@ -217,40 +222,41 @@ class AdProcessor:
     # comparable business-day minutes so that times crossing
     # midnight compare correctly.
     def refresh_open_close_minutes(self):
-        now = datetime.datetime.now()
-        now_minutes = NormalizeTime(now.strftime("%H:%M"))
+        time_now = datetime.datetime.now()
+        min_now = time_now.hour * 60 + time_now.minute
 
-        if now_minutes >= 24 * 60:
-            business_day = (now - datetime.timedelta(days=1)).strftime("%a")
-        else:
-            business_day = now.strftime("%a")
-
-        if business_day == self.day:
-            return
-
-        self.day = business_day
+        self.day = NormalizeDay(time_now)   # Business day
+        real_day = NormalizeDay(time_now, 0) # The actual day
+        next_day = NormalizeDay(time_now + datetime.timedelta(days=1))
 
         try:
+            # This is our Business day
             hours = cast(DayHours, CONFIG["OpenHours"][self.day])
-            open_time = hours["open"]
+            open_time  = hours["open"]
             close_time = hours["close"]
 
+            # The next day's open time is our reboot time (maybe)
+            next_hours = cast(DayHours, CONFIG["OpenHours"][next_day])
+            next_open_time = next_hours["open"]
+
         except Exception as e:
-            logger.warning("Invalid OpenHours for %s: %s", self.day, e)
-            open_time = "11:00"
-            close_time = "2:00"
+            logger.warning("Invalid OpenHours %s", e)
+            open_time = '11:00'
+            close_time = '2:00'
+            next_open_time = '11:00'
 
         self.open_minutes = NormalizeTime(open_time)
         self.close_minutes = NormalizeTime(close_time)
+        self.reboot_minutes =  NormalizeTime(next_open_time) - 30
 
-        logger.warning(
-            "Business day %s opens at %s (%d) and closes at %s (%d)",
-            self.day,
-            open_time,
-            self.open_minutes,
-            close_time,
-            self.close_minutes,
-        )
+        """
+        reboot_minutes is the open time of the next day. We need to handle 
+        the time between the end of the business day and the morning reboot.
+        """
+        if self.day == real_day and min_now < self.open_minutes-30:
+            self.reboot_minutes = self.open_minutes - 30
+    
+        logger.warning(f"Today ({self.day}) we open at {open_time} and close at {close_time} and will reboot at {next_open_time}")
 
     #///////////////////////////////////////////////////////////////////////////////
     #
@@ -352,9 +358,6 @@ class AdProcessor:
     #////////////////////////////////////////////////////////////////////////////
     #
     def run(self):
-        # Create the heartbeat so PiWatchdog sees us.
-        CreateMonFile()
-
         _shutdown = threading.Event()
 
         def _on_signal(_signum: int, _frame: Optional[FrameType]) -> None:
@@ -368,7 +371,10 @@ class AdProcessor:
         # Give labwc/Wayland/VLC fullscreen path time to settle.
         # No signal handler installed yet, so stale TERM from restart cannot set _shutdown.
         _shutdown.wait(timeout=10.0)
-    
+
+        # Create the heartbeat so PiWatchdog sees us.
+        CreateMonFile()
+
         wake_time = 0
         self.turn_display(True)
     
