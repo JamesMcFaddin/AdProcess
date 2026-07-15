@@ -17,6 +17,11 @@ Source = Literal["current", "defaults"]
 configDefaults: dict[str, Any] = {
     "BusinessDayStarts": "06:00",
 
+    "OfficeDesktop": {
+        "host": "192.168.1.140",
+        "port": 445
+    },
+
     "OpenHours": {
         "Mon": {"open": "11:00", "close": "2:00"},
         "Tue": {"open": "11:00", "close": "2:00"},

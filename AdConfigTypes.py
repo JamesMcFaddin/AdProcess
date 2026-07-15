@@ -14,6 +14,10 @@ class TimeBlock(TypedDict):
     start: str
     end: str
 
+class OfficeDesktopConfig(TypedDict):
+    host: str
+    port: int
+
 class PlayListEntry(TypedDict, total=False):
     video: str
     start: str  # Time format "HH:MM", optional
@@ -39,7 +43,7 @@ class PlayerConfigBase(TypedDict):
 # that contains a 'default' key and any number of player configs.
 PlayerConfig = dict[str, Any]  # Use cast when accessing nested values
 
-class OpenHours(TypedDict):
+class OpnHours(TypedDict):
     Mon: DayHours
     Tue: DayHours
     Wed: DayHours
@@ -49,7 +53,9 @@ class OpenHours(TypedDict):
     Sun: DayHours
 
 class ConfigDefaults(TypedDict):
-    OpenHours: OpenHours
+    StartOfDay: str
+    OfficeDesktop: OfficeDesktopConfig
+    OpenHours: OpnHours
     Players: PlayerConfig
 
 class VenuePlaylist(TypedDict):

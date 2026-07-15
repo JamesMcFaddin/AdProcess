@@ -25,8 +25,20 @@ logger = logging.getLogger(__name__)
 
 _last_reachable: bool | None = None
 
+###############################################################################
+#
+# Returns True if OfficeDesktop is accepting SMB connections.
+#
+# Uses the configured IP address rather than hostname so that temporary
+# DNS/mDNS problems cannot interfere with determining whether the CIFS
+# server is reachable.
+#
 def OfficeDesktopReachable(timeout_seconds: float = 3.0) -> bool:
     global _last_reachable
+
+    office = cfg.CONFIG["OfficeDesktop"]
+    host = office["host"]
+    port = office["port"]
 
     reachable = False
     reason = ""
@@ -34,7 +46,7 @@ def OfficeDesktopReachable(timeout_seconds: float = 3.0) -> bool:
     for attempt in range(2):
         try:
             with socket.create_connection(
-                ("OfficeDesktop", 445),
+                (host, port),
                 timeout=timeout_seconds,
             ):
                 reachable = True
@@ -50,8 +62,10 @@ def OfficeDesktopReachable(timeout_seconds: float = 3.0) -> bool:
             reason = str(e)
 
             logger.debug(
-                "OfficeDesktop reachability attempt %d/2 failed: %s",
+                "OfficeDesktop reachability attempt %d/2 to %s:%d failed: %s",
                 attempt + 1,
+                host,
+                port,
                 reason,
             )
 
@@ -64,17 +78,24 @@ def OfficeDesktopReachable(timeout_seconds: float = 3.0) -> bool:
     if reachable != _last_reachable:
 
         if reachable:
-            logger.info("OfficeDesktop is reachable again.")
+            logger.info(
+                "OfficeDesktop (%s:%d) is reachable again.",
+                host,
+                port,
+            )
 
         else:
             logger.warning(
-                f"OfficeDesktop is no longer reachable: {reason}"
+                "OfficeDesktop (%s:%d) is no longer reachable: %s",
+                host,
+                port,
+                reason,
             )
 
         _last_reachable = reachable
 
     return reachable
-    
+
 ###############
 def _iter_playlist_videos(local_playlist_path: Path) -> List[str]:
     try:

@@ -30,7 +30,6 @@ from AdConfigTypes import DayHours
 from SyncFiles import SyncFiles
 from Player import StopPlayer
 from PlayList import NormalizeTime, NormalizeDay, ProcessPlayList
-
 import logging
 from AdLogging import *
 logger = logging.getLogger(__name__)
