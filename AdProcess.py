@@ -238,10 +238,16 @@ class AdProcessor:
         reboot_minutes is the open time of the next day. We need to handle 
         the time between the end of the business day and the morning reboot.
         """
-        if self.day == real_day and min_now < self.open_minutes-30:
+        next_day = "on " + next_day
+        before_reboot = min_now < (self.open_minutes - 30)
+
+        if self.day == real_day and before_reboot:
             self.reboot_minutes = self.open_minutes - 30
-    
-        logger.warning(f"Today ({self.day}) we open at {open_time} and close at {close_time} and will reboot at {next_open_time}")
+            next_day = "today"
+
+        hours, minutes = divmod(self.reboot_minutes, 60)
+        rb_time = f"{hours}:{minutes:02d}"
+        logger.warning(f"Today ({self.day}) we open at {open_time} and close at {close_time} and will reboot at {rb_time} {next_day}")
 
     #///////////////////////////////////////////////////////////////////////////////
     #

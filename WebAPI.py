@@ -685,7 +685,6 @@ def RestartWebApiServer(reason: str = "") -> None:
 
     # Give the socket a brief moment to release before rebinding.
     time.sleep(1)
-
     _start_webapi_thread(HOST, PORT)
 
 
