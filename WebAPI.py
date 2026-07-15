@@ -772,25 +772,71 @@ def StartWebApiMonitor() -> None:
 
 def StopWebApiServer() -> None:
     """
-    Cleanly stop the HTTP server and release the port.
-    Safe to call multiple times.
+    Stop the current HTTP server and wait briefly for its thread to exit.
+
+    Safe to call multiple times. A stuck shutdown is logged and returned from
+    rather than allowing the caller to hang forever.
     """
     global _web_srv
-
-    with _web_lock:
-        srv = _web_srv
-        _web_srv = None
-
-    if not srv:
-        return
+    global _web_thread
 
     try:
+        with _web_lock:
+            srv = _web_srv
+            web_thread = _web_thread
+            _web_srv = None
+
+        if srv is None:
+            return
+
         logger.info("WebAPI stopping...")
-        srv.shutdown()      # breaks serve_forever()
-        srv.server_close()  # releases socket
+
+        shutdown_done = threading.Event()
+
+        def _shutdown_server() -> None:
+            try:
+                srv.shutdown()
+            except Exception as e:
+                logger.warning("WebAPI shutdown failed: %r", e)
+            finally:
+                shutdown_done.set()
+
+        shutdown_thread = threading.Thread(
+            target=_shutdown_server,
+            name="WebAPI-Shutdown",
+            daemon=True,
+        )
+        shutdown_thread.start()
+
+        if not shutdown_done.wait(timeout=5.0):
+            logger.warning("WebAPI shutdown timed out after 5 seconds.")
+
+        try:
+            srv.server_close()
+        except Exception as e:
+            logger.warning("WebAPI server_close failed: %r", e)
+
+        if (
+            web_thread is not None
+            and web_thread is not threading.current_thread()
+        ):
+            web_thread.join(timeout=5.0)
+
+            if web_thread.is_alive():
+                logger.warning(
+                    "WebAPI thread did not exit within 5 seconds."
+                )
+
+        with _web_lock:
+            if _web_thread is web_thread and (
+                web_thread is None or not web_thread.is_alive()
+            ):
+                _web_thread = None
+
         logger.info("WebAPI stopped")
+
     except Exception as e:
-        logger.warning("WebAPI stop failed: %r", e)
+        logger.warning("WebAPI stop exception: %r", e)
 
 
 # -----------------------------------------------------------------------------
@@ -806,10 +852,15 @@ def StartWebApiServer(host: str = HOST, port: int = PORT) -> None:
     can refresh the WebAPI listener without restarting AdProcess.
     """
     global _web_srv
+    global _web_thread
+
+    srv: Optional[_ReusableThreadingHTTPServer] = None
 
     try:
+        srv = _ReusableThreadingHTTPServer((host, port), Handler)
+
         with _web_lock:
-            _web_srv = _ReusableThreadingHTTPServer((host, port), Handler)
+            _web_srv = srv
 
         logger.info("WebAPI listening on %s:%s", host, port)
 
@@ -817,20 +868,23 @@ def StartWebApiServer(host: str = HOST, port: int = PORT) -> None:
         # calls do not create duplicate monitor threads.
         StartWebApiMonitor()
 
-        srv = _web_srv
-        if srv:
-            srv.serve_forever()
+        srv.serve_forever()
 
     except Exception as e:
-        logger.error("WebAPI failed to start/bind: %r", e)
+        logger.warning("WebAPI failed to start/bind: %r", e)
 
     finally:
-        with _web_lock:
-            srv = _web_srv
-            _web_srv = None
-
         try:
-            if srv:
+            if srv is not None:
                 srv.server_close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("WebAPI final server_close failed: %r", e)
+
+        with _web_lock:
+            if _web_srv is srv:
+                _web_srv = None
+
+            if _web_thread is threading.current_thread():
+                _web_thread = None
+
+        logger.info("WebAPI listener thread exited")

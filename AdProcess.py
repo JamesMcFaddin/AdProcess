@@ -163,10 +163,7 @@ def CreateMonFile() -> bool:
 class AdProcessor:
     open_minutes: int = 0
     close_minutes: int = 0
-
     reboot_minutes: int = 0
-    business_day: str = ""
-    reboot_day: str = ""
 
     day: str = ""
 
@@ -190,19 +187,8 @@ class AdProcessor:
         now = NormalizeTime(datetime.datetime.now().strftime("%H:%M"))
         return (self.open_minutes - 30) <= now <= (self.close_minutes + 30)
 
-    # Return the normalized business-day minute at which the
-    # system should wake or reboot.
     #
-    # Example:
-    #     Open = 11:00
-    #     Offset = -30
-    #     Returns 10:30 (630)
-    def compute_wake_time(self, offset_minutes: int = -30) -> int:
-        wake_time = self.open_minutes + offset_minutes
-        return wake_time
-
     # Return the current raw clock time as minutes past midnight.
-    #
     # This is NOT normalized business-day time.
     #
     # Examples:
@@ -247,7 +233,7 @@ class AdProcessor:
 
         self.open_minutes = NormalizeTime(open_time)
         self.close_minutes = NormalizeTime(close_time)
-        self.reboot_minutes =  NormalizeTime(next_open_time) - 30
+        self.reboot_minutes = NormalizeTime(next_open_time) - 30
 
         """
         reboot_minutes is the open time of the next day. We need to handle 
@@ -395,9 +381,7 @@ class AdProcessor:
                 logger.info("Closed. Going to sleep until we open...")
                 StopPlayer()
                 self.turn_display(False)
-
-                self.refresh_open_close_minutes()
-                wake_time = self.compute_wake_time()
+                wake_time = self.reboot_minutes
 
             if wake_time != 0:
                 if self.current_minutes() >= wake_time:
