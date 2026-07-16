@@ -3,27 +3,56 @@
 #
 # This software is licensed under the MIT License.
 # See the LICENSE file or https://opensource.org/licenses/MIT for details.
+#
+# Summary
+# -------
+# Synchronize the Pi's local video library with the master copies stored on
+# OfficeDesktop.
+#
+# Design goals:
+#
+#   1. Do not touch the CIFS share unless OfficeDesktop is accepting SMB
+#      connections.
+#
+#   2. Synchronize only videos referenced by the current local playlist.
+#
+#   3. Copy at most one video per call so the main AdProcess loop remains
+#      responsive.
+#
+#   4. Copy to a temporary file first, then replace the destination only after
+#      the copy completes. VLC should never see a partially copied video.
+#
+#   5. If the destination video is currently playing, stop VLC, replace the
+#      file, then resume playback.
+#
+#   6. Treat every CIFS filesystem operation as fallible. OfficeDesktop may
+#      answer on port 445 while the existing mount is stale or unavailable.
+#      Filesystem exceptions are logged and SyncFiles returns without allowing
+#      the exception to terminate AdProcess.
+#
+# Returns:
+#     The name of the synchronized video, or "" if nothing was synchronized.
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, Dict, List, cast
 import json
-import shutil
-import contextlib
 import logging
-import time
+import shutil
 import socket
-from typing import Dict, List, Any, cast
+import time
 
 import AdConfig as cfg
 from AdLogging import PL, VID, START, DONE
 from Player import GetCurrentlyPlaying, StopPlayer, PlayVideo
 from AdShutdown import ShutdownRequested
 
+
 logger = logging.getLogger(__name__)
 
-
 _last_reachable: bool | None = None
+
 
 ###############################################################################
 #
@@ -36,9 +65,13 @@ _last_reachable: bool | None = None
 def OfficeDesktopReachable(timeout_seconds: float = 3.0) -> bool:
     global _last_reachable
 
-    office = cfg.CONFIG["OfficeDesktop"]
-    host = office["host"]
-    port = office["port"]
+    try:
+        office = cfg.CONFIG["OfficeDesktop"]
+        host = str(office["host"])
+        port = int(office["port"])
+    except Exception as e:
+        logger.warning("Invalid OfficeDesktop configuration: %s", e)
+        return False
 
     reachable = False
     reason = ""
@@ -76,14 +109,12 @@ def OfficeDesktopReachable(timeout_seconds: float = 3.0) -> bool:
                 time.sleep(2)
 
     if reachable != _last_reachable:
-
         if reachable:
             logger.info(
                 "OfficeDesktop (%s:%d) is reachable again.",
                 host,
                 port,
             )
-
         else:
             logger.warning(
                 "OfficeDesktop (%s:%d) is no longer reachable: %s",
@@ -96,7 +127,9 @@ def OfficeDesktopReachable(timeout_seconds: float = 3.0) -> bool:
 
     return reachable
 
-###############
+
+###############################################################################
+#
 def _iter_playlist_videos(local_playlist_path: Path) -> List[str]:
     try:
         with local_playlist_path.open("r", encoding="utf-8") as f:
@@ -106,17 +139,24 @@ def _iter_playlist_videos(local_playlist_path: Path) -> List[str]:
         return []
 
     try:
-        venue: Dict[str, Any] = cast(Dict[str, Any], pl.get("Venue", {}))
+        venue: Dict[str, Any] = cast(
+            Dict[str, Any],
+            pl.get("Venue", {}),
+        )
         entries_obj: Dict[str, Dict[str, Any]] = cast(
-            Dict[str, Dict[str, Any]], venue.get("entries", {})
+            Dict[str, Dict[str, Any]],
+            venue.get("entries", {}),
         )
 
         vids: List[str] = []
+
         for entry in entries_obj.values():
             raw: Any = entry.get("video")
-            name: str = raw.strip() if isinstance(raw, str) else ""
+            name = raw.strip() if isinstance(raw, str) else ""
+
             if name.lower().endswith(".mp4"):
                 vids.append(name)
+
         return vids
 
     except Exception as e:
@@ -124,137 +164,299 @@ def _iter_playlist_videos(local_playlist_path: Path) -> List[str]:
         return []
 
 
-###############
-def _video_needs_sync(src: Path, dst: Path) -> bool:
-    if not dst.exists():
-        return True
+###############################################################################
+#
+def _safe_exists(path: Path, description: str) -> bool | None:
+    """
+    Return:
+        True  - path exists
+        False - path does not exist
+        None  - the filesystem operation failed
+
+    None is intentionally distinct from False because a stale CIFS mount is
+    not the same condition as a missing file.
+    """
     try:
-        sst, dstst = src.stat(), dst.stat()
-        return sst.st_size != dstst.st_size or sst.st_mtime > dstst.st_mtime + 1
-    except Exception:
+        return path.exists()
+    except Exception as e:
+        logger.warning(
+            "%s Unable to check %s '%s': %s",
+            VID,
+            description,
+            path,
+            e,
+        )
+        return None
+
+
+###############################################################################
+#
+def _safe_stat(path: Path, description: str) -> Any | None:
+    try:
+        return path.stat()
+    except Exception as e:
+        logger.warning(
+            "%s Unable to stat %s '%s': %s",
+            VID,
+            description,
+            path,
+            e,
+        )
+        return None
+
+
+###############################################################################
+#
+def _remove_tmp_file(tmp: Path) -> None:
+    try:
+        if tmp.exists():
+            tmp.unlink()
+    except Exception as e:
+        logger.warning(
+            "%s Unable to remove temporary file '%s': %s",
+            VID,
+            tmp,
+            e,
+        )
+
+
+###############################################################################
+#
+def _video_needs_sync(src: Path, dst: Path) -> bool | None:
+    """
+    Return:
+        True  - destination needs synchronization
+        False - destination is current
+        None  - source/destination metadata could not be read safely
+    """
+    dst_exists = _safe_exists(dst, "local video")
+
+    if dst_exists is None:
+        return None
+
+    if not dst_exists:
         return True
 
+    src_stat = _safe_stat(src, "cloud video")
+    dst_stat = _safe_stat(dst, "local video")
 
-###############
+    if src_stat is None or dst_stat is None:
+        return None
+
+    return (
+        src_stat.st_size != dst_stat.st_size
+        or src_stat.st_mtime > dst_stat.st_mtime + 1
+    )
+
+
+###############################################################################
+#
 def SyncFiles() -> str:
     logger.debug(f"{START} ********** Sync start **********")
 
-    if not OfficeDesktopReachable():
-        return ""
-    
-    local_playlist = Path(cfg.LOCAL_CONFIGS) / "PlayList.json"
-    video_names = _iter_playlist_videos(local_playlist)
+    try:
+        if not OfficeDesktopReachable():
+            return ""
 
-    cloud_video_dir, local_video_dir = Path(cfg.CLOUD_VIDEOS), Path(cfg.LOCAL_VIDEOS)
-    if not cloud_video_dir.exists():
-        logger.debug("%s cloud video dir missing: %s", VID, cloud_video_dir)
-    if not local_video_dir.exists():
-        logger.debug("%s local video dir missing: %s", VID, local_video_dir)
+        local_playlist = Path(cfg.LOCAL_CONFIGS) / "PlayList.json"
+        video_names = _iter_playlist_videos(local_playlist)
 
-    synced_name: str = ""
+        cloud_video_dir = Path(cfg.CLOUD_VIDEOS)
+        local_video_dir = Path(cfg.LOCAL_VIDEOS)
 
-    for name in video_names:
-        src = cloud_video_dir / name
-        dst = local_video_dir / name
+        cloud_dir_exists = _safe_exists(
+            cloud_video_dir,
+            "cloud video directory",
+        )
 
-        if not src.exists():
-            logger.debug("%s cloud missing: %s", VID, src)
-            continue
+        if cloud_dir_exists is None:
+            return ""
 
-        if not dst.parent.exists():
-            logger.debug("%s dest dir missing: %s (skip %s)", VID, dst.parent, name)
-            continue
+        if not cloud_dir_exists:
+            logger.debug(
+                "%s cloud video dir missing: %s",
+                VID,
+                cloud_video_dir,
+            )
+            return ""
 
-        if not _video_needs_sync(src, dst):
-            logger.debug("%s up-to-date: %s", VID, name)
-            continue
+        local_dir_exists = _safe_exists(
+            local_video_dir,
+            "local video directory",
+        )
 
-        # ⛔ Don't start a long copy if shutdown is requested
-        if ShutdownRequested():
+        if local_dir_exists is None:
+            return ""
+
+        if not local_dir_exists:
+            logger.debug(
+                "%s local video dir missing: %s",
+                VID,
+                local_video_dir,
+            )
+            return ""
+
+        synced_name = ""
+
+        for name in video_names:
+            src = cloud_video_dir / name
+            dst = local_video_dir / name
+
+            src_exists = _safe_exists(src, "cloud video")
+
+            if src_exists is None:
+                return ""
+
+            if not src_exists:
+                logger.debug("%s cloud missing: %s", VID, src)
+                continue
+
+            dst_parent_exists = _safe_exists(
+                dst.parent,
+                "destination directory",
+            )
+
+            if dst_parent_exists is None:
+                return ""
+
+            if not dst_parent_exists:
+                logger.debug(
+                    "%s dest dir missing: %s (skip %s)",
+                    VID,
+                    dst.parent,
+                    name,
+                )
+                continue
+
+            needs_sync = _video_needs_sync(src, dst)
+
+            if needs_sync is None:
+                return ""
+
+            if not needs_sync:
+                logger.debug("%s up-to-date: %s", VID, name)
+                continue
+
+            if ShutdownRequested():
+                break
+
+            tmp = dst.with_suffix(".tmp")
+
+            src_stat = _safe_stat(src, "cloud video")
+            size_bytes = src_stat.st_size if src_stat is not None else -1
+
+            t0 = time.perf_counter()
+
+            try:
+                shutil.copy2(src, tmp)
+            except Exception as e:
+                dt = time.perf_counter() - t0
+                logger.warning(
+                    "%s copy2 failed %s -> %s after %.3fs: %s",
+                    VID,
+                    src,
+                    tmp,
+                    dt,
+                    e,
+                )
+                _remove_tmp_file(tmp)
+                return ""
+
+            dt = time.perf_counter() - t0
+
+            if size_bytes > 0 and dt > 0:
+                mib = size_bytes / (1024 * 1024)
+                mibps = mib / dt
+
+                logger.debug(
+                    "copy2 %s -> %s %.1f MiB in %.3fs (%.2f MiB/s)",
+                    src.name,
+                    tmp.name,
+                    mib,
+                    dt,
+                    mibps,
+                )
+            else:
+                logger.debug(
+                    "copy2 %s -> %s took %.3fs",
+                    src.name,
+                    tmp.name,
+                    dt,
+                )
+
+            current = GetCurrentlyPlaying()
+
+            try:
+                is_current = (
+                    bool(current)
+                    and Path(current).resolve() == dst.resolve()
+                )
+            except Exception as e:
+                logger.warning(
+                    "%s Unable to compare current video with '%s': %s",
+                    VID,
+                    dst,
+                    e,
+                )
+                _remove_tmp_file(tmp)
+                return ""
+
+            if is_current:
+                if ShutdownRequested():
+                    _remove_tmp_file(tmp)
+                    break
+
+                StopPlayer()
+
+                try:
+                    tmp.replace(dst)
+                except Exception as e:
+                    logger.warning(
+                        "%s replace failed %s -> %s: %s",
+                        VID,
+                        tmp,
+                        dst,
+                        e,
+                    )
+                    _remove_tmp_file(tmp)
+                    return ""
+
+                synced_name = name
+                logger.info(
+                    "%s synced video (was playing): %s",
+                    VID,
+                    name,
+                )
+
+                if ShutdownRequested():
+                    break
+
+                PlayVideo(str(dst))
+
+            else:
+                try:
+                    tmp.replace(dst)
+                except Exception as e:
+                    logger.warning(
+                        "%s replace failed %s -> %s: %s",
+                        VID,
+                        tmp,
+                        dst,
+                        e,
+                    )
+                    _remove_tmp_file(tmp)
+                    return ""
+
+                synced_name = name
+                logger.info("%s synced video: %s", VID, name)
+
+            # Synchronize only one video per call.
             break
 
-        tmp = dst.with_suffix(".tmp")
+        logger.debug(f"{DONE} ********** Sync complete **********")
+        return synced_name
 
-        # --- TIMED COPY (NO RAISES) ---
-        # Best-effort size fetch for throughput stats
-        try:
-            size_bytes = src.stat().st_size
-        except OSError:
-            size_bytes = -1
-
-        t0 = time.perf_counter()
-        try:
-            shutil.copy2(src, tmp)
-        except Exception as e:
-            dt = time.perf_counter() - t0
-            logger.debug("copy2 FAILED %s -> %s after %.3fs : %s", src, tmp, dt, e)
-            with contextlib.suppress(Exception):
-                if tmp.exists():
-                    tmp.unlink()
-            continue
-
-        dt = time.perf_counter() - t0
-
-        if size_bytes > 0 and dt > 0:
-            mib = size_bytes / (1024 * 1024)
-            mibps = mib / dt
-            logger.debug(
-                "copy2 %s -> %s  %.1f MiB in %.3fs (%.2f MiB/s)",
-                src.name,
-                tmp.name,
-                mib,
-                dt,
-                mibps,
-            )
-        else:
-            logger.debug("copy2 %s -> %s took %.3fs", src.name, tmp.name, dt)
-
-        # Re-check current AFTER the copy (state may have changed)
-        current = GetCurrentlyPlaying()
-        is_current = bool(current) and Path(current).resolve() == dst.resolve()
-
-        if is_current:
-            # If shutdown is requested, don't disrupt playback or swap under it
-            if ShutdownRequested():
-                with contextlib.suppress(Exception):
-                    if tmp.exists():
-                        tmp.unlink()
-                break
-
-            StopPlayer()
-
-            try:
-                tmp.replace(dst)
-            except Exception as e:
-                logger.debug("replace FAILED %s -> %s : %s", tmp, dst, e)
-                with contextlib.suppress(Exception):
-                    if tmp.exists():
-                        tmp.unlink()
-                continue
-
-            synced_name = name
-            logger.info("%s synced video (was playing): %s", VID, name)
-
-            if ShutdownRequested():
-                break
-
-            PlayVideo(str(dst))
-
-        else:
-            try:
-                tmp.replace(dst)
-            except Exception as e:
-                logger.debug("replace FAILED %s -> %s : %s", tmp, dst, e)
-                with contextlib.suppress(Exception):
-                    if tmp.exists():
-                        tmp.unlink()
-                continue
-
-            synced_name = name
-            logger.info("%s synced video: %s", VID, name)
-
-        # Only sync ONE per call
-        break
-
-    logger.debug(f"{DONE} ********** Sync complete **********")
-    return synced_name
+    except Exception as e:
+        # Final safety net: SyncFiles must never terminate AdProcess.
+        logger.warning("Unexpected SyncFiles exception: %r", e)
+        return ""
