@@ -21,27 +21,18 @@ import socket
 import threading
 import subprocess
 import os
-import time
 
 import logging
 logger = logging.getLogger(__name__)
 
 import AdConfig as cfg
-from AdLogging import CheckLogLevel, GetLogPaths
+from AdLogging import GetDebugFlagPath, CheckLogLevel, GetLogPaths
 
 HOST, PORT = "0.0.0.0", 8787
 _START_TS = datetime.now()
 
 _web_srv: Optional[ThreadingHTTPServer] = None
 _web_thread: Optional[threading.Thread] = None
-_monitor_thread: Optional[threading.Thread] = None
-_web_lock = threading.RLock()
-_last_officedesktop_ip: Optional[str] = None
-
-OFFICEDESKTOP_CHECK_SECONDS = 60
-OFFICEDESKTOP_CONNECT_TIMEOUT_SECONDS = 5
-OFFICEDESKTOP_NAME = "OfficeDesktop"
-OFFICEDESKTOP_PORT = 445
 
 class _ReusableThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
@@ -291,6 +282,25 @@ def _display_onoff(on: bool) -> bool:
         return False
 
 
+
+# -----------------------------------------------------------------------------
+# HTTP routing
+# -----------------------------------------------------------------------------
+
+from dataclasses import dataclass
+from difflib import get_close_matches
+
+
+@dataclass(frozen=True)
+class Route:
+    handler: str
+    description: str
+
+
+GET_ROUTES: dict[str, Route] = {}
+POST_ROUTES: dict[str, Route] = {}
+
+
 # -----------------------------------------------------------------------------
 # HTTP Handler
 # -----------------------------------------------------------------------------
@@ -326,6 +336,90 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return {}
 
+    def _command_list(self) -> list[Dict[str, str]]:
+        commands: list[Dict[str, str]] = []
+
+        for method, routes in (("GET", GET_ROUTES), ("POST", POST_ROUTES)):
+            for path, route in routes.items():
+                commands.append({
+                    "method": method,
+                    "path": path,
+                    "description": route.description,
+                })
+
+        return sorted(
+            commands,
+            key=lambda item: (item["method"], item["path"]),
+        )
+
+    def _unknown_command(
+        self,
+        method: str,
+        path: str,
+        routes: dict[str, Route],
+    ) -> None:
+        matches = get_close_matches(
+            path,
+            list(routes),
+            n=3,
+            cutoff=0.6,
+        )
+
+        response: Dict[str, Any] = {
+            "ok": False,
+            "hostname": cfg.REMOTE_NAME,
+            "detail": f"no {method} {path or '/'}",
+        }
+
+        if matches:
+            response["did_you_mean"] = matches[0] if len(matches) == 1 else matches
+        else:
+            response["available_commands"] = self._command_list()
+
+        self._send_json(response, 404)
+
+    def _dispatch(self, method: str, routes: dict[str, Route]) -> None:
+        path = (self.path or "").rstrip("/") or "/"
+        ip = _client_ip(self)
+
+        logger.debug("WebAPI %s %s from %s", method, path, ip)
+
+        route = routes.get(path)
+        if route is None:
+            self._unknown_command(method, path, routes)
+            return
+
+        handler = getattr(self, route.handler, None)
+        if not callable(handler):
+            logger.error(
+                "WebAPI route %s %s has invalid handler %r",
+                method,
+                path,
+                route.handler,
+            )
+            self._send_json(
+                {
+                    "ok": False,
+                    "hostname": cfg.REMOTE_NAME,
+                    "detail": f"handler unavailable for {method} {path}",
+                },
+                500,
+            )
+            return
+
+        try:
+            handler()
+        except Exception as e:
+            logger.exception("WebAPI %s %s failed", method, path)
+            self._send_json(
+                {
+                    "ok": False,
+                    "hostname": cfg.REMOTE_NAME,
+                    "detail": str(e),
+                },
+                500,
+            )
+
     # Keep signature EXACT (Pylance + stdlib override)
     def log_message(self, format: str, *args: Any) -> None:
         try:
@@ -333,436 +427,284 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
-    # ----------------------------
-    # GET
-    # ----------------------------
-
     def do_GET(self) -> None:
-        path = (self.path or "").rstrip("/")
-        ip = _client_ip(self)
+        self._dispatch("GET", GET_ROUTES)
 
-        logger.debug("WebAPI GET %s from %s", path or "/", ip)
+    def do_POST(self) -> None:
+        _ = self._parse_json()  # payload currently unused
+        self._dispatch("POST", POST_ROUTES)
 
-        # Roku-ish endpoint
-        if path == "/query/device-info":
-            self._send_xml(_device_info_xml(), 200)
+    # ------------------------------------------------------------------
+    # GET handlers
+    # ------------------------------------------------------------------
+
+    def get_commands(self) -> None:
+        self._send_json({
+            "ok": True,
+            "hostname": cfg.REMOTE_NAME,
+            "commands": self._command_list(),
+        })
+
+    def get_device_info(self) -> None:
+        self._send_xml(_device_info_xml(), 200)
+
+    def get_health(self) -> None:
+        self._send_json({
+            "ok": True,
+            "hostname": cfg.REMOTE_NAME,
+            "detail": "adprocess alive",
+        })
+
+    def get_info(self) -> None:
+        self._send_json({
+            "ok": True,
+            "data": {
+                "hostname": cfg.REMOTE_NAME,
+                "ip": str(cfg.CONFIG.get("DEVICE_IP", _local_ip_best_effort())),
+                "version": str(cfg.CONFIG.get("VERSION", "1.x")),
+                "uptime_s": int((datetime.now() - _START_TS).total_seconds()),
+                "thread": threading.get_ident(),
+            },
+        })
+
+    def get_playlist(self) -> None:
+        playlist_path = Path(cfg.SCRIPT_DIR) / "config" / "PlayList.json"
+        data = _read_json_file(playlist_path)
+
+        if not data:
+            self._send_json(
+                {
+                    "ok": False,
+                    "hostname": cfg.REMOTE_NAME,
+                    "detail": f"missing or invalid playlist: {playlist_path}",
+                },
+                404,
+            )
             return
 
-        if path == "/api/health":
-            self._send_json(
+        self._send_json({
+            "ok": True,
+            "hostname": cfg.REMOTE_NAME,
+            "path": str(playlist_path),
+            "playlist": data,
+        })
+
+    def get_playlist_ram(self) -> None:
+        """
+        Return the in-memory playlist.
+        """
+        pl_value: object = getattr(cfg, "PLAY_LIST", {})
+
+        if isinstance(pl_value, dict):
+            playlist: Dict[str, Any] = cast(Dict[str, Any], pl_value)
+        else:
+            playlist = {"_value": pl_value}
+
+        self._send_json(
             {
                 "ok": True,
                 "hostname": cfg.REMOTE_NAME,
-                "detail": "adprocess alive"
-            })
+                "playlist": playlist,
+            }
+        )
 
-            return
+    def _send_logs(self, want_ram: bool, want_sd: bool, full_file: bool) -> None:
+        ram_log, sd_log = _log_paths_snapshot()
+        logs_obj: Dict[str, Any] = {}
 
-        if path == "/api/info":
-            ram_log, sd_log = _log_paths_snapshot()
+        if want_ram:
+            if ram_log and ram_log.exists():
+                lines = _read_all_log_lines(ram_log) if full_file else _read_log_lines(ram_log)
+                logs_obj["ram"] = {
+                    "hostname": cfg.REMOTE_NAME,
+                    "path": str(ram_log),
+                    "fs": _fs_type(ram_log),
+                    "bytes": sum(len(s) + 1 for s in lines),
+                    "lines": len(lines),
+                    "content": lines,
+                }
+            else:
+                logs_obj["ram"] = {
+                    "hostname": cfg.REMOTE_NAME,
+                    "path": str(ram_log) if ram_log else "",
+                    "bytes": 0,
+                    "lines": 0,
+                    "content": [],
+                }
 
+        if want_sd:
+            if sd_log and sd_log.exists():
+                lines = _read_all_log_lines(sd_log) if full_file else _read_log_lines(sd_log)
+                logs_obj["sd"] = {
+                    "hostname": cfg.REMOTE_NAME,
+                    "path": str(sd_log),
+                    "fs": _fs_type(sd_log),
+                    "bytes": sum(len(s) + 1 for s in lines),
+                    "lines": len(lines),
+                    "content": lines,
+                }
+            else:
+                logs_obj["sd"] = {
+                    "hostname": cfg.REMOTE_NAME,
+                    "path": str(sd_log) if sd_log else "",
+                    "bytes": 0,
+                    "lines": 0,
+                    "content": [],
+                }
+
+        self._send_json({"ok": True, "logs": logs_obj})
+
+    def get_logs(self) -> None:
+        self._send_logs(want_ram=True, want_sd=True, full_file=False)
+
+    def get_logs_ram(self) -> None:
+        self._send_logs(want_ram=True, want_sd=False, full_file=True)
+
+    def get_logs_sd(self) -> None:
+        self._send_logs(want_ram=False, want_sd=True, full_file=True)
+
+    # ------------------------------------------------------------------
+    # POST handlers
+    # ------------------------------------------------------------------
+
+    def post_quit(self) -> None:
+        quit_path = Path(cfg.HOME_DIR) / "quit"
+
+        try:
             self._send_json({
                 "ok": True,
-                "data": {
-                    "hostname": cfg.REMOTE_NAME,
-                    "ip": str(cfg.CONFIG.get("DEVICE_IP", _local_ip_best_effort())),
-                    "RamlogPath": str(ram_log),
-                    "SDlogPath": str(sd_log),
-                    "version": str(cfg.CONFIG.get("VERSION", "1.x")),
-                    "uptime_s": int((datetime.now() - _START_TS).total_seconds()),
-                    "thread": threading.get_ident(),
-                },
+                "hostname": cfg.REMOTE_NAME,
+                "detail": f"quit requested: {quit_path}",
             })
-            return
+        except Exception:
+            pass
 
-        # ------------------------------------------------------------------
-        # PLAYLIST
-        #   - /api/playlist       -> SCRIPT_DIR/config/Playlist.json (disk)
-        #   - /api/playlist/ram   -> cfg.PLAY_LIST (in-memory)
-        # ------------------------------------------------------------------
-
-        if path == "/api/playlist":
-            playlist_path = Path(cfg.SCRIPT_DIR) / "config" / "PlayList.json"
-            data = _read_json_file(playlist_path)
-
-            if not data:
-                self._send_json(
-                {
-                    "ok": False,
-                    "hostname": cfg.REMOTE_NAME,
-                    "detail": f"missing or invalid playlist: {playlist_path}"},
-                    404
-                )
-
-            else:
-                self._send_json(
-                {
-                    "ok": True,
-                    "hostname": cfg.REMOTE_NAME,
-                    "path": str(playlist_path), "playlist": data}
-                )
-            return
-
-        if path == "/api/playlist/ram":
+        def _do_quit() -> None:
             try:
-                pl: Any = getattr(cfg, "PLAY_LIST", {})
-                if isinstance(pl, dict):
-                    self._send_json(
-                    {
-                        "ok": True,
-                        "hostname": cfg.REMOTE_NAME,
-                        "playlist": pl
-                    })
-                    self._send_json({"ok": True, "playlist": pl})
-
-                else:
-                    self._send_json(
-                    {
-                        "ok": True,
-                        "hostname": cfg.REMOTE_NAME,
-                        "playlist": {"_value": pl}
-                    })
-
-            except Exception as e:
-                self._send_json(
-                {
-                    "ok": False,
-                    "hostname": cfg.REMOTE_NAME,
-                    "detail": str(e)
-                }, 500)
-            return
-
-        # Logs
-        if path in ("/api/logs", "/api/logs/ram", "/api/logs/sd"):
-            ram_log, sd_log = _log_paths_snapshot()
-
-            want_ram = path in ("/api/logs", "/api/logs/ram")
-            want_sd = path in ("/api/logs", "/api/logs/sd")
-
-            # If it's a single-log endpoint, return the full file.
-            full_file = path in ("/api/logs/ram", "/api/logs/sd")
-
-            logs_obj: Dict[str, Any] = {}
-
-            if want_ram:
-                if ram_log and ram_log.exists():
-                    lines = _read_all_log_lines(ram_log) if full_file else _read_log_lines(ram_log)
-                    logs_obj["ram"] = {
-                        "hostname": cfg.REMOTE_NAME,
-                        "path": str(ram_log),
-                        "fs": _fs_type(ram_log),
-                        "bytes": sum(len(s) + 1 for s in lines),
-                        "lines": len(lines),
-                        "content": lines,
-                    }
-                else:
-                    logs_obj["ram"] = {"path": str(ram_log) if ram_log else "", "bytes": 0, "lines": 0, "content": []}
-
-            if want_sd:
-                if sd_log and sd_log.exists():
-                    lines = _read_all_log_lines(sd_log) if full_file else _read_log_lines(sd_log)
-                    logs_obj["sd"] = {
-                        "hostname": cfg.REMOTE_NAME,
-                        "path": str(sd_log),
-                        "fs": _fs_type(sd_log),
-                        "bytes": sum(len(s) + 1 for s in lines),
-                        "lines": len(lines),
-                        "content": lines,
-                    }
-                else:
-                    logs_obj["sd"] = {"path": str(sd_log) if sd_log else "", "bytes": 0, "lines": 0, "content": []}
-
-            self._send_json({"ok": True, "logs": logs_obj})
-            return
-
-        self._send_json(
-        {
-            "ok": False,
-            "hostname": cfg.REMOTE_NAME,
-            "detail": f"no GET {path or '/'}"
-        }, 404)
-
-    # ----------------------------
-    # POST
-    # ----------------------------
-
-    def do_POST(self) -> None:
-        path = (self.path or "").rstrip("/")
-        ip = _client_ip(self)
-
-        logger.debug("WebAPI POST %s from %s", path or "/", ip)
-
-        _ = self._parse_json()  # payload currently unused
-
-        # ------------------------------------------------------------------
-        # System control:
-        #   - /api/quit          -> touch quit file (cooperative shutdown)
-        #   - /api/system_reboot -> systemctl reboot (hard reboot)
-        # ------------------------------------------------------------------
-
-        if path == "/api/quit":
-            quit_path = Path(cfg.QUIT_FLAG)
-
-            # Reply first so the client sees success before we shut down the server.
-            try:
-                self._send_json({"ok": True, "detail": f"quit requested: {quit_path}"})
+                quit_path.write_text("1", encoding="utf-8")
             except Exception:
                 pass
 
-            def _do_quit() -> None:
-                try:
-                    cfg.FLAGS_DIR.mkdir(parents=True, exist_ok=True)
-                    quit_path.write_text("1", encoding="utf-8")
-                except Exception:
-                    pass
+        threading.Thread(target=_do_quit, daemon=True).start()
 
-            threading.Thread(target=_do_quit, daemon=True).start()
-            return
-
-        if path == "/api/system_reboot":
-            try:
-                self._send_json({"ok": True, "detail": "system reboot requested"})
-            except Exception:
-                pass
-
-            def _do_reboot() -> None:
-                try:
-                    if cfg.IsRaspberryPI():
-                        subprocess.run(["/usr/bin/systemctl", "reboot"], check=False)
-                except Exception:
-                    pass
-
-            threading.Thread(target=_do_reboot, daemon=True).start()
-            return
-
-        # Roku-style power endpoints
-        if path == "/keypress/PowerOn":
-            ok = _display_onoff(True)
-            self._send_json(
-                {"ok": ok, "detail": "PowerOn accepted" if ok else "PowerOn failed"},
-                200 if ok else 500,
-            )
-            return
-
-        if path == "/keypress/PowerOff":
-            ok = _display_onoff(False)
-            self._send_json(
-                {"ok": ok, "detail": "PowerOff accepted" if ok else "PowerOff failed"},
-                200 if ok else 500,
-            )
-            return
-
-        # Log level toggles
-        debug_flag = Path(cfg.DEBUG_FLAG)
-
-        if path == "/api/loglevel/DEBUG":
-            try:
-                cfg.FLAGS_DIR.mkdir(parents=True, exist_ok=True)
-                debug_flag.touch(exist_ok=True)
-                CheckLogLevel()
-                self._send_json({"ok": True, "detail": f"log level set to DEBUG: {debug_flag}"})
-            except Exception as e:
-                self._send_json({"ok": False, "detail": str(e)}, 500)
-            return
-
-        if path == "/api/loglevel/INFO":
-            try:
-                debug_flag.unlink(missing_ok=True)
-                CheckLogLevel()
-                self._send_json({"ok": True, "detail": "log level set to INFO"})
-            except Exception as e:
-                self._send_json({"ok": False, "detail": str(e)}, 500)
-            return
-
-        # Stubs kept for compatibility
-        if path in ("/api/play", "/api/start"):
-            self._send_json({"ok": True, "detail": "play/start accepted"})
-            return
-
-        if path == "/api/stop":
-            self._send_json({"ok": True, "detail": "stop accepted"})
-            return
-
-        if path == "/api/goto_input":
-            self._send_json({"ok": False, "detail": "goto_input not supported for AdProcessTV"}, 400)
-            return
-
-        self._send_json({"ok": False, "detail": f"no POST {path or '/'}"}, 404)
-
-
-
-
-# -----------------------------------------------------------------------------
-# OfficeDesktop reachability monitor / WebAPI self-heal
-# -----------------------------------------------------------------------------
-
-def _resolve_officedesktop_ip() -> str:
-    """
-    Resolve OfficeDesktop while it is reachable and cache the IP in memory.
-
-    After OfficeDesktop disappears, name resolution can block or fail before
-    socket timeout applies. Using the last known IP avoids getting stuck in
-    DNS/NetBIOS lookup while this AdProcess run is alive.
-    """
-    global _last_officedesktop_ip
-
-    try:
-        ip = socket.gethostbyname(OFFICEDESKTOP_NAME)
-        if ip:
-            if _last_officedesktop_ip != ip:
-                logger.info("OfficeDesktop resolved: %s -> %s", OFFICEDESKTOP_NAME, ip)
-            _last_officedesktop_ip = ip
-            return ip
-
-    except Exception as e:
-        logger.debug("OfficeDesktop name resolution failed: %r", e)
-
-    if _last_officedesktop_ip:
-        return _last_officedesktop_ip
-
-    return OFFICEDESKTOP_NAME
-
-
-def _officedesktop_reachable(
-    port: int = OFFICEDESKTOP_PORT,
-    timeout_seconds: int = OFFICEDESKTOP_CONNECT_TIMEOUT_SECONDS,
-) -> bool:
-    """
-    Check whether OfficeDesktop is reachable from this Pi.
-
-    Uses the last known IP once available so the monitor does not get stuck
-    trying to resolve OfficeDesktop after it disappears from TvLand.
-    """
-    host = _resolve_officedesktop_ip()
-
-    try:
-        with socket.create_connection((host, port), timeout=timeout_seconds):
-            return True
-    except Exception as e:
-        logger.debug(
-            "OfficeDesktop reachability check failed: %s:%s: %r",
-            host,
-            port,
-            e,
-        )
-        return False
-
-
-def _start_webapi_thread(host: str = HOST, port: int = PORT) -> None:
-    """
-    Start the blocking WebAPI server loop in its own daemon thread.
-
-    Safe to call repeatedly. If the existing thread appears alive, it does
-    nothing. If the previous server died or was stopped, it starts a new one.
-    """
-    global _web_thread
-
-    with _web_lock:
-        if _web_thread and _web_thread.is_alive():
-            return
-
-        _web_thread = threading.Thread(
-            target=StartWebApiServer,
-            args=(host, port),
-            name="WebAPI",
-            daemon=True,
-        )
-        _web_thread.start()
-
-
-def RestartWebApiServer(reason: str = "") -> None:
-    """
-    Restart only the WebAPI listener/thread.
-
-    This does not restart AdProcess, VLC, the Pi, or the main processing loop.
-    """
-    if reason:
-        logger.warning("Restarting WebAPI: %s", reason)
-    else:
-        logger.warning("Restarting WebAPI")
-
-    StopWebApiServer()
-
-    # Give the socket a brief moment to release before rebinding.
-    time.sleep(1)
-    _start_webapi_thread(HOST, PORT)
-
-
-def _webapi_monitor_loop() -> None:
-    """
-    Background monitor that watches for OfficeDesktop to leave and return.
-
-    The useful transition is:
-
-        reachable -> unreachable -> reachable
-
-    When OfficeDesktop becomes reachable again, restart only the WebAPI
-    listener. This gives the browser/client a fresh listener without rebooting
-    the Pi and without restarting the main AdProcess video loop.
-    """
-    last_reachable: Optional[bool] = None
-
-    # Let startup settle before the first network check.
-    time.sleep(OFFICEDESKTOP_CHECK_SECONDS)
-
-    while True:
+    def post_system_reboot(self) -> None:
         try:
-            logger.debug("OfficeDesktop monitor tick BEFORE reachability")
+            self._send_json({
+                "ok": True,
+                "hostname": cfg.REMOTE_NAME,
+                "detail": "system reboot requested",
+            })
+        except Exception:
+            pass
 
-            reachable = _officedesktop_reachable()
+        def _do_reboot() -> None:
+            try:
+                if cfg.IsRaspberryPI():
+                    subprocess.run(["/usr/bin/systemctl", "reboot"], check=False)
+            except Exception:
+                pass
 
-            logger.debug("OfficeDesktop monitor tick AFTER reachability")
+        threading.Thread(target=_do_reboot, daemon=True).start()
 
-            logger.debug(
-                "OfficeDesktop monitor cycle host=%s reachable=%s",
-                _resolve_officedesktop_ip(),
-                reachable,
-            )
-
-            if last_reachable is None:
-                logger.info(
-                    "OfficeDesktop monitor started: %s:%s reachable=%s",
-                    _resolve_officedesktop_ip(),
-                    OFFICEDESKTOP_PORT,
-                    reachable,
-                )
-
-            elif reachable != last_reachable:
-                if reachable:
-                    logger.warning(
-                        "OfficeDesktop is reachable again; refreshing WebAPI listener."
-                    )
-                    RestartWebApiServer("OfficeDesktop returned to TvLand")
-                else:
-                    logger.warning(
-                        "OfficeDesktop is no longer reachable from this Pi."
-                    )
-
-            last_reachable = reachable
-
-        except Exception as e:
-            logger.warning("WebAPI monitor exception: %r", e)
-
-        time.sleep(OFFICEDESKTOP_CHECK_SECONDS)
-
-
-def StartWebApiMonitor() -> None:
-    """
-    Start the WebAPI/OfficeDesktop monitor once.
-    """
-    global _monitor_thread
-
-    with _web_lock:
-        if _monitor_thread and _monitor_thread.is_alive():
-            return
-
-        _monitor_thread = threading.Thread(
-            target=_webapi_monitor_loop,
-            name="WebAPI-Monitor",
-            daemon=True,
+    def post_power_on(self) -> None:
+        ok = _display_onoff(True)
+        self._send_json(
+            {
+                "ok": ok,
+                "hostname": cfg.REMOTE_NAME,
+                "detail": "PowerOn accepted" if ok else "PowerOn failed",
+            },
+            200 if ok else 500,
         )
-        _monitor_thread.start()
-        logger.info("WebAPI monitor started")
+
+    def post_power_off(self) -> None:
+        ok = _display_onoff(False)
+        self._send_json(
+            {
+                "ok": ok,
+                "hostname": cfg.REMOTE_NAME,
+                "detail": "PowerOff accepted" if ok else "PowerOff failed",
+            },
+            200 if ok else 500,
+        )
+
+    def post_loglevel_debug(self) -> None:
+        debug_flag = GetDebugFlagPath()
+        debug_flag.touch(exist_ok=True)
+        CheckLogLevel()
+        self._send_json({
+            "ok": True,
+            "hostname": cfg.REMOTE_NAME,
+            "detail": "log level set to DEBUG",
+        })
+
+    def post_loglevel_info(self) -> None:
+        debug_flag = GetDebugFlagPath()
+        if debug_flag.exists():
+            debug_flag.unlink()
+        CheckLogLevel()
+        self._send_json({
+            "ok": True,
+            "hostname": cfg.REMOTE_NAME,
+            "detail": "log level set to INFO",
+        })
+
+    def post_play(self) -> None:
+        self._send_json({
+            "ok": True,
+            "hostname": cfg.REMOTE_NAME,
+            "detail": "play accepted",
+        })
+
+    def post_start(self) -> None:
+        self._send_json({
+            "ok": True,
+            "hostname": cfg.REMOTE_NAME,
+            "detail": "start accepted",
+        })
+
+    def post_stop(self) -> None:
+        self._send_json({
+            "ok": True,
+            "hostname": cfg.REMOTE_NAME,
+            "detail": "stop accepted",
+        })
+
+    def post_goto_input(self) -> None:
+        self._send_json(
+            {
+                "ok": False,
+                "hostname": cfg.REMOTE_NAME,
+                "detail": "goto_input not supported for AdProcessTV",
+            },
+            400,
+        )
+
+
+GET_ROUTES.update({
+    "/api/commands": Route("get_commands", "Return all available API commands"),
+    "/api/health": Route("get_health", "Return service health"),
+    "/api/info": Route("get_info", "Return device and service information"),
+    "/api/logs": Route("get_logs", "Return recent RAM and SD logs"),
+    "/api/logs/ram": Route("get_logs_ram", "Return the complete RAM log"),
+    "/api/logs/sd": Route("get_logs_sd", "Return the complete SD log"),
+    "/api/playlist": Route("get_playlist", "Return the playlist stored on disk"),
+    "/api/playlist/ram": Route("get_playlist_ram", "Return the in-memory playlist"),
+    "/query/device-info": Route("get_device_info", "Return Roku-style device information XML"),
+})
+
+POST_ROUTES.update({
+    "/api/goto_input": Route("post_goto_input", "Report that input selection is unsupported"),
+    "/api/loglevel/DEBUG": Route("post_loglevel_debug", "Set the application log level to DEBUG"),
+    "/api/loglevel/INFO": Route("post_loglevel_info", "Set the application log level to INFO"),
+    "/api/play": Route("post_play", "Accept a play request"),
+    "/api/quit": Route("post_quit", "Request cooperative application shutdown"),
+    "/api/start": Route("post_start", "Accept a start request"),
+    "/api/stop": Route("post_stop", "Accept a stop request"),
+    "/api/system_reboot": Route("post_system_reboot", "Request a system reboot"),
+    "/keypress/PowerOff": Route("post_power_off", "Turn the display off"),
+    "/keypress/PowerOn": Route("post_power_on", "Turn the display on"),
+})
 
 
 # -----------------------------------------------------------------------------
@@ -771,71 +713,19 @@ def StartWebApiMonitor() -> None:
 
 def StopWebApiServer() -> None:
     """
-    Stop the current HTTP server and wait briefly for its thread to exit.
-
-    Safe to call multiple times. A stuck shutdown is logged and returned from
-    rather than allowing the caller to hang forever.
+    Cleanly stop the HTTP server and release the port.
+    Safe to call multiple times.
     """
     global _web_srv
-    global _web_thread
-
     try:
-        with _web_lock:
-            srv = _web_srv
-            web_thread = _web_thread
+        if _web_srv:
+            logger.info("WebAPI stopping...")
+            _web_srv.shutdown()      # breaks serve_forever()
+            _web_srv.server_close()  # releases socket
             _web_srv = None
-
-        if srv is None:
-            return
-
-        logger.info("WebAPI stopping...")
-
-        shutdown_done = threading.Event()
-
-        def _shutdown_server() -> None:
-            try:
-                srv.shutdown()
-            except Exception as e:
-                logger.warning("WebAPI shutdown failed: %r", e)
-            finally:
-                shutdown_done.set()
-
-        shutdown_thread = threading.Thread(
-            target=_shutdown_server,
-            name="WebAPI-Shutdown",
-            daemon=True,
-        )
-        shutdown_thread.start()
-
-        if not shutdown_done.wait(timeout=5.0):
-            logger.warning("WebAPI shutdown timed out after 5 seconds.")
-
-        try:
-            srv.server_close()
-        except Exception as e:
-            logger.warning("WebAPI server_close failed: %r", e)
-
-        if (
-            web_thread is not None
-            and web_thread is not threading.current_thread()
-        ):
-            web_thread.join(timeout=5.0)
-
-            if web_thread.is_alive():
-                logger.warning(
-                    "WebAPI thread did not exit within 5 seconds."
-                )
-
-        with _web_lock:
-            if _web_thread is web_thread and (
-                web_thread is None or not web_thread.is_alive()
-            ):
-                _web_thread = None
-
-        logger.info("WebAPI stopped")
-
+            logger.info("WebAPI stopped")
     except Exception as e:
-        logger.warning("WebAPI stop exception: %r", e)
+        logger.warning("WebAPI stop failed: %r", e)
 
 
 # -----------------------------------------------------------------------------
@@ -845,45 +735,18 @@ def StopWebApiServer() -> None:
 def StartWebApiServer(host: str = HOST, port: int = PORT) -> None:
     """
     Blocking server loop. Run this in a daemon thread from AdProcess.
-
-    This function starts the WebAPI/OfficeDesktop monitor once, then blocks in
-    serve_forever(). If OfficeDesktop leaves and returns to TvLand, the monitor
-    can refresh the WebAPI listener without restarting AdProcess.
     """
     global _web_srv
-    global _web_thread
-
-    srv: Optional[_ReusableThreadingHTTPServer] = None
-
     try:
-        srv = _ReusableThreadingHTTPServer((host, port), Handler)
-
-        with _web_lock:
-            _web_srv = srv
-
+        _web_srv = _ReusableThreadingHTTPServer((host, port), Handler)
         logger.info("WebAPI listening on %s:%s", host, port)
-
-        # Start monitor from the first WebAPI launch. It is guarded so repeated
-        # calls do not create duplicate monitor threads.
-        StartWebApiMonitor()
-
-        srv.serve_forever()
-
+        _web_srv.serve_forever()
     except Exception as e:
-        logger.warning("WebAPI failed to start/bind: %r", e)
-
+        logger.error("WebAPI failed to start/bind: %r", e)
     finally:
         try:
-            if srv is not None:
-                srv.server_close()
-        except Exception as e:
-            logger.warning("WebAPI final server_close failed: %r", e)
-
-        with _web_lock:
-            if _web_srv is srv:
-                _web_srv = None
-
-            if _web_thread is threading.current_thread():
-                _web_thread = None
-
-        logger.info("WebAPI listener thread exited")
+            if _web_srv:
+                _web_srv.server_close()
+        except Exception:
+            pass
+        _web_srv = None
