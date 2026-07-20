@@ -352,18 +352,65 @@ class Handler(BaseHTTPRequestHandler):
             key=lambda item: (item["method"], item["path"]),
         )
 
+    def _close_route_matches(
+        self,
+        path: str,
+        routes: dict[str, Route],
+    ) -> list[str]:
+        """
+        Return structurally close route paths.
+
+        Each path segment is compared independently so a shared prefix such as
+        "/api/logs/" cannot make an unrelated final segment look like a valid
+        correction.
+        """
+        requested_parts = [
+            part
+            for part in path.strip("/").split("/")
+            if part
+        ]
+
+        matches: list[str] = []
+
+        for route_path in routes:
+            route_parts = [
+                part
+                for part in route_path.strip("/").split("/")
+                if part
+            ]
+
+            if len(requested_parts) != len(route_parts):
+                continue
+
+            route_matches = True
+
+            for requested, valid in zip(requested_parts, route_parts):
+                if requested == valid:
+                    continue
+
+                close_segment = get_close_matches(
+                    requested,
+                    [valid],
+                    n=1,
+                    cutoff=0.7,
+                )
+
+                if not close_segment:
+                    route_matches = False
+                    break
+
+            if route_matches:
+                matches.append(route_path)
+
+        return sorted(matches)
+
     def _unknown_command(
         self,
         method: str,
         path: str,
         routes: dict[str, Route],
     ) -> None:
-        matches = get_close_matches(
-            path,
-            list(routes),
-            n=3,
-            cutoff=0.6,
-        )
+        matches = self._close_route_matches(path, routes)
 
         response: Dict[str, Any] = {
             "ok": False,
@@ -372,7 +419,11 @@ class Handler(BaseHTTPRequestHandler):
         }
 
         if matches:
-            response["did_you_mean"] = matches[0] if len(matches) == 1 else matches
+            response["did_you_mean"] = (
+                matches[0]
+                if len(matches) == 1
+                else matches
+            )
         else:
             response["available_commands"] = self._command_list()
 
@@ -500,13 +551,11 @@ class Handler(BaseHTTPRequestHandler):
         else:
             playlist = {"_value": pl_value}
 
-        self._send_json(
-            {
-                "ok": True,
-                "hostname": cfg.REMOTE_NAME,
-                "playlist": playlist,
-            }
-        )
+        self._send_json({
+            "ok": True,
+            "hostname": cfg.REMOTE_NAME,
+            "playlist": playlist,
+        })
 
     def _send_logs(self, want_ram: bool, want_sd: bool, full_file: bool) -> None:
         ram_log, sd_log = _log_paths_snapshot()
