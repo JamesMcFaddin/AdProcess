@@ -1,3 +1,9 @@
+# install_adprocess.sh - AdProcess System
+# Copyright (c) 2025 James Eddy (James McFaddin)
+#
+# This software is licensed under the MIT License.
+# See the LICENSE file or https://opensource.org/licenses/MIT for details.
+
 #!/usr/bin/env bash
 # AdProcess System Installer (Phase 1 → Phase 2)
 # Copyright (c) 2025 James Eddy
@@ -837,10 +843,15 @@ fi
 #   AdProcess
 #       Main signage application.
 #
+#   PiWatchdog
+#       Continuously monitors component heartbeat files and
+#       requests recovery or reboots the Pi when required.
+#
 # Architecture:
 #   Normal boot:
 #       labwc -> AdLauncher
 #       labwc -> AdProcess
+#       labwc -> PiWatchdog
 #
 #   Runtime recovery:
 #       PiWatchdog writes AdProcess.launch
@@ -862,6 +873,7 @@ if [[ "$NORMAL_MODE" == true ]]; then
 
   ADLAUNCHER_CMD="exec /usr/bin/python3 $HOME/AdProcess/AdLauncher/AdLauncher.py &"
   ADPROCESS_CMD="exec /usr/bin/python3 $HOME/AdProcess/AdProcess.py &"
+  PIWATCHDOG_CMD="exec /usr/bin/python3 $HOME/PiWatchdog/PiWatchdog.py &"
 
   mkdir -p "$(dirname "$AUTOSTART_FILE")"
   touch "$AUTOSTART_FILE"
@@ -871,8 +883,10 @@ if [[ "$NORMAL_MODE" == true ]]; then
   # earlier AdLauncher attempts.
   sed -i '/AdProcess\.py/d' "$AUTOSTART_FILE"
   sed -i '/AdLauncher\.py/d' "$AUTOSTART_FILE"
+  sed -i '/PiWatchdog\.py/d' "$AUTOSTART_FILE"
   sed -i '/# AdProcess autostart/d' "$AUTOSTART_FILE"
   sed -i '/# AdLauncher autostart/d' "$AUTOSTART_FILE"
+  sed -i '/# PiWatchdog autostart/d' "$AUTOSTART_FILE"
   sed -i '/# AdProcess system autostart/d' "$AUTOSTART_FILE"
 
   {
@@ -880,6 +894,7 @@ if [[ "$NORMAL_MODE" == true ]]; then
     echo "$AUTOSTART_MARKER"
     echo "$ADLAUNCHER_CMD"
     echo "$ADPROCESS_CMD"
+    echo "$PIWATCHDOG_CMD"
   } >> "$AUTOSTART_FILE"
 
   chmod +x "$AUTOSTART_FILE" || true
@@ -887,6 +902,7 @@ if [[ "$NORMAL_MODE" == true ]]; then
   log "LabWC autostart configured:"
   log "  $ADLAUNCHER_CMD"
   log "  $ADPROCESS_CMD"
+  log "  $PIWATCHDOG_CMD"
 else
   log "Lite mode: leaving autostart unchanged."
 fi
@@ -897,7 +913,7 @@ fi
 # Purpose:
 #   Register a one-shot systemd service that runs
 #   after reboot to install/update AdProcess support
-#   components such as PiNotify and PiWatchdog.
+#   components such as PiNotify.
 #
 # Script:
 #   ~/AdProcess/service/install_components.sh
