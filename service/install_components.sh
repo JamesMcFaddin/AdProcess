@@ -1,4 +1,9 @@
-#!/usr/bin/env bash
+# install_components.sh - AdProcess System
+# Copyright (c) 2025 James Eddy (James McFaddin)
+#
+# This software is licensed under the MIT License.
+# See the LICENSE file or https://opensource.org/licenses/MIT for details.
+
 # AdProcess Component Installer
 # Installs post-reboot AdProcess ecosystem components.
 # Copyright (c) 2025 James Eddy
@@ -125,7 +130,6 @@ mkdir -p "$PINOTIFY_DIR/Working"
 # Purpose:
 #   Install or update the PiWatchdog repository,
 #   create required directories, and install the
-#   PiWatchdog systemd service/timer.
 #
 # Directories:
 #   ~/PiWatchdog
@@ -154,27 +158,13 @@ install_repo \
     "$HOME/PiWatchdog" \
     "PiWatchdog"
 
-chmod +x "$HOME/PiWatchdog/install_pi-watchdog.sh" || true
-
-log "Running PiWatchdog installer..."
-
-sudo "$HOME/PiWatchdog/install_pi-watchdog.sh"
-
 #--------------------------------------------------
 # Component Installer Completion
 #
 # Purpose:
-#   Disable/remove the one-shot systemd unit if this
-#   script was launched automatically after reboot.
 #
 # Notes:
-#   These commands are best effort. The script can also
-#   be run manually, in which case the service may not
-#   exist yet.
+#
 #--------------------------------------------------
-log "Cleaning up post-reboot component installer service if present..."
-sudo systemctl disable adprocess-install-components.service >/dev/null 2>&1 || true
-sudo rm -f /etc/systemd/system/adprocess-install-components.service
-sudo systemctl daemon-reload || true
 
 log "Component install complete."
