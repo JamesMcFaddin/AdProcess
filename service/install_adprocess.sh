@@ -823,6 +823,34 @@ else
 fi
 
 #--------------------------------------------------
+# Remove Legacy Stuff
+#
+# Purpose:
+#   Remove the obsolete PiWatchdog systemd service
+#   and timer used by earlier AdProcess installs.
+#
+# Notes:
+#   PiWatchdog is now started by LabWC autostart.
+#   Best effort only. Safe to re-run.
+#--------------------------------------------------
+if [[ "$NORMAL_MODE" == true ]]; then
+  log "Removing legacy PiWatchdog systemd units..."
+
+  sudo systemctl disable --now pi-watchdog.timer >/dev/null 2>&1 || true
+  sudo systemctl disable --now pi-watchdog.service >/dev/null 2>&1 || true
+
+  sudo rm -f /etc/systemd/system/pi-watchdog.timer
+  sudo rm -f /etc/systemd/system/pi-watchdog.service
+
+  sudo systemctl daemon-reload || true
+  sudo systemctl reset-failed || true
+
+  log "Legacy PiWatchdog systemd units removed."
+else
+  log "Lite mode: skipping legacy cleanup."
+fi
+
+#--------------------------------------------------
 # LabWC Autostart Configuration
 #
 # Purpose:
