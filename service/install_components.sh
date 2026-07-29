@@ -1,5 +1,8 @@
+<<<<<<< HEAD
 #!/bin/bash
 
+=======
+>>>>>>> 5ab0ebb4e7f87cd0e59dc61d1fac66af38913b2b
 # install_components.sh - AdProcess System
 # Copyright (c) 2025 James Eddy (James McFaddin)
 #
@@ -144,17 +147,51 @@ mkdir -p "$PINOTIFY_DIR/Outbox"
 mkdir -p "$PINOTIFY_DIR/Working"
 
 #--------------------------------------------------
+<<<<<<< HEAD
+=======
+# Install PiWatchdog
+#
+# Purpose:
+#   Install or update the PiWatchdog repository,
+#   create required directories, and install the
+#
+# Directories:
+#   ~/PiWatchdog
+#       PiWatchdog application files.
+#
+#   ~/Flags
+#       Shared control, status, heartbeat, and
+#       debug files used by AdProcess, PiNotify,
+#       PiWatchdog, and administrative tools.
+#
+#   ~/Archive
+#       Persistent storage for archived logs,
+#       diagnostics, and future support files.
+#
+# Notes:
+#   Installation details are owned by the
+#   PiWatchdog project itself and are performed by:
+#
+#       ~/PiWatchdog/install_pi-watchdog.sh
+#
+#   Safe to re-run.
+#--------------------------------------------------
+
+install_repo \
+    "https://github.com/JamesMcFaddin/PiWatchdog.git" \
+    "$HOME/PiWatchdog" \
+    "PiWatchdog"
+
+#--------------------------------------------------
+>>>>>>> 5ab0ebb4e7f87cd0e59dc61d1fac66af38913b2b
 # Component Installer Completion
 #
 # Purpose:
-#   Disable/remove the one-shot systemd unit if this
-#   script was launched automatically after reboot.
 #
 # Notes:
-#   These commands are best effort. The script can also
-#   be run manually, in which case the service may not
-#   exist yet.
+#
 #--------------------------------------------------
+<<<<<<< HEAD
 
 log "Cleaning up post-reboot component installer service if present..."
 
@@ -166,5 +203,7 @@ sudo rm -f \
   /etc/systemd/system/adprocess-install-components.service
 
 sudo systemctl daemon-reload || true
+=======
+>>>>>>> 5ab0ebb4e7f87cd0e59dc61d1fac66af38913b2b
 
 log "Component install complete."
